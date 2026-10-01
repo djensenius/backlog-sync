@@ -11,6 +11,7 @@ type RenderOptions struct {
 	IssueByTaskID map[string]Issue
 	TaskByID      map[string]Task
 	Milestones    map[string]string
+	MainBranch    string
 }
 
 func RenderIssueBody(task Task, issueByTaskID map[string]Issue, taskByID map[string]Task) string {
@@ -24,11 +25,14 @@ func RenderIssueBodyWithOptions(task Task, opts RenderOptions) string {
 	if opts.TaskByID == nil {
 		opts.TaskByID = map[string]Task{}
 	}
+	if opts.MainBranch == "" {
+		opts.MainBranch = "main"
+	}
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "%s\n", MarkerFor(task.ID))
 	fmt.Fprintf(&b, "%s\n\n", mirrorNotice)
 	fmt.Fprintf(&b, "Status: %s\n", task.Status)
-	if task.Branch != "" && task.Branch != "main" {
+	if task.Branch != "" && task.Branch != opts.MainBranch {
 		fmt.Fprintf(&b, "Branch: %s\n", task.Branch)
 	}
 	fmt.Fprintf(&b, "Project: %s\n", stringPtrOrNone(task.Project))

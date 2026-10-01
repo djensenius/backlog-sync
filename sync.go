@@ -17,18 +17,20 @@ type App struct {
 	verboseSeen map[string]bool
 }
 
-func (a App) Run(ctx context.Context, cfg Config) (Counters, error) {
+func (a *App) Run(ctx context.Context, cfg Config) (Counters, error) {
 	if a.Logf == nil {
 		a.Logf = func(string, ...any) {}
 	}
 	cfg = cfg.Normalized()
 	prefix, err := a.Backlog.TaskPrefix(ctx, cfg.Root)
 	if err != nil {
-		a.Logf("warning: read task prefix through backlog config failed; using configured/default prefix %q: %v", cfg.TaskPrefix, err)
-	} else if prefix != "" {
-		cfg.TaskPrefix = prefix
+		return Counters{}, fmt.Errorf("read task prefix through backlog config: %w", err)
 	}
-	resolved, err := CollectTasks(ctx, cfg.Root, a.Git, a.Backlog, a.Logf)
+	if strings.TrimSpace(prefix) == "" {
+		return Counters{}, fmt.Errorf("read task prefix through backlog config: empty prefix")
+	}
+	cfg.TaskPrefix = strings.ToLower(strings.TrimSpace(prefix))
+	resolved, err := CollectTasks(ctx, cfg, a.Git, a.Backlog, a.Logf)
 	if err != nil {
 		return Counters{}, err
 	}
@@ -45,14 +47,25 @@ func (a App) Run(ctx context.Context, cfg Config) (Counters, error) {
 	if err != nil {
 		return Counters{}, err
 	}
-	markerIssues, _ := IndexIssues(allIssues, cfg.Inbox.Label, a.Logf)
+	markerIssues, _ := IndexIssues(allIssues, cfg.Inbox.Label, cfg.TaskPrefix, a.Logf)
 	issueByTaskID := map[string]Issue{}
+	claimedIssues := map[string]string{}
 	for id, issue := range markerIssues {
 		issueByTaskID[id] = issue
+		if key := issueClaimKey(issue); key != "" {
+			claimedIssues[key] = id
+		}
+	}
+	for _, issue := range allIssues {
+		if id, ok := ParseMarkerWithPrefix(issue.Body, cfg.TaskPrefix); ok {
+			if key := issueClaimKey(issue); key != "" {
+				claimedIssues[key] = id
+			}
+		}
 	}
 	var counters Counters
 	if cfg.Inbox.Enabled && !cfg.NoInbox {
-		imported, linked, err := a.processInbox(ctx, cfg, allIssues, markerIssues, issueByTaskID, resolved)
+		imported, linked, err := a.processInbox(ctx, cfg, allIssues, markerIssues, issueByTaskID, claimedIssues, resolved)
 		if err != nil {
 			return counters, err
 		}
@@ -60,9 +73,12 @@ func (a App) Run(ctx context.Context, cfg Config) (Counters, error) {
 		for id, issue := range linked {
 			markerIssues[id] = issue
 			issueByTaskID[id] = issue
+			if key := issueClaimKey(issue); key != "" {
+				claimedIssues[key] = id
+			}
 		}
 	}
-	a.adoptReferencedIssues(cfg, resolved, allIssues, markerIssues, issueByTaskID)
+	a.adoptReferencedIssues(cfg, resolved, allIssues, markerIssues, issueByTaskID, claimedIssues)
 	// First pass creates/adopts issues and gets project items. Bodies are intentionally rendered in pass two
 	// after every task has an issue mapping, making the next real run a no-op.
 	projectItems, err := a.GitHub.ListProjectItems(ctx, project.ID)
@@ -88,7 +104,7 @@ func (a App) Run(ctx context.Context, cfg Config) (Counters, error) {
 					return counters, err
 				}
 			}
-			body := RenderIssueBodyWithOptions(task, RenderOptions{IssueByTaskID: issueByTaskID, TaskByID: resolved.ByID, Milestones: milestones})
+			body := RenderIssueBodyWithOptions(task, RenderOptions{IssueByTaskID: issueByTaskID, TaskByID: resolved.ByID, Milestones: milestones, MainBranch: cfg.MainBranch})
 			a.LogAction(cfg.DryRun, "create issue %s in %s", IssueTitle(task), repo)
 			if !cfg.DryRun {
 				created, err := a.GitHub.CreateIssue(ctx, repo, IssueTitle(task), body, labels)
@@ -130,7 +146,7 @@ func (a App) Run(ctx context.Context, cfg Config) (Counters, error) {
 			counters.FieldChanges += a.logDryRunFieldSets(cfg, project, task, milestones)
 			continue
 		}
-		body := RenderIssueBodyWithOptions(task, RenderOptions{IssueByTaskID: issueByTaskID, TaskByID: resolved.ByID, Milestones: milestones})
+		body := RenderIssueBodyWithOptions(task, RenderOptions{IssueByTaskID: issueByTaskID, TaskByID: resolved.ByID, Milestones: milestones, MainBranch: cfg.MainBranch})
 		labels := DesiredLabels(task, issue, cfg)
 		patch, fields := DiffIssue(task, issue, body, labels)
 		if len(fields) > 0 {
@@ -173,6 +189,8 @@ func (a App) Run(ctx context.Context, cfg Config) (Counters, error) {
 				item = added
 				item.ContentNodeID = issue.NodeID
 				projectByContent[issue.NodeID] = item
+			} else {
+				item = ProjectItem{ID: "DRY-RUN-" + issue.NodeID, ContentNodeID: issue.NodeID, FieldValues: map[string]ProjectFieldValue{}}
 			}
 			counters.ProjectAdded++
 		}
@@ -190,7 +208,7 @@ func (a App) Run(ctx context.Context, cfg Config) (Counters, error) {
 	return counters, nil
 }
 
-func (a App) listConfiguredIssues(ctx context.Context, cfg Config) ([]Issue, error) {
+func (a *App) listConfiguredIssues(ctx context.Context, cfg Config) ([]Issue, error) {
 	var all []Issue
 	for _, repo := range cfg.ConfiguredRepos() {
 		issues, err := a.GitHub.ListIssues(ctx, repo)
@@ -205,7 +223,7 @@ func (a App) listConfiguredIssues(ctx context.Context, cfg Config) ([]Issue, err
 	return all, nil
 }
 
-func (a App) validateProjectStatusOptions(ctx context.Context, cfg Config, resolved ResolvedTasks) (ProjectInfo, error) {
+func (a *App) validateProjectStatusOptions(ctx context.Context, cfg Config, resolved ResolvedTasks) (ProjectInfo, error) {
 	statuses, err := a.Backlog.Statuses(ctx, cfg.Root)
 	if err != nil {
 		return ProjectInfo{}, err
@@ -241,14 +259,14 @@ func projectStatusName(cfg Config, backlogStatus string) string {
 	return backlogStatus
 }
 
-func IndexIssues(issues []Issue, inboxLabel string, logf func(string, ...any)) (map[string]Issue, []Issue) {
+func IndexIssues(issues []Issue, inboxLabel, taskPrefix string, logf func(string, ...any)) (map[string]Issue, []Issue) {
 	byMarker := map[string]Issue{}
 	var inbox []Issue
 	for _, issue := range issues {
 		if hasLabelFold(issue, inboxLabel) && issue.State == "open" {
 			inbox = append(inbox, issue)
 		}
-		id, ok := ParseMarker(issue.Body)
+		id, ok := ParseMarkerWithPrefix(issue.Body, taskPrefix)
 		if !ok {
 			continue
 		}
@@ -379,25 +397,40 @@ func DiffIssue(task Task, issue Issue, body string, labels []string) (IssuePatch
 	return patch, fields
 }
 
-func (a App) processInbox(ctx context.Context, cfg Config, issues []Issue, markerIssues map[string]Issue, issueByTaskID map[string]Issue, resolved ResolvedTasks) (int, map[string]Issue, error) {
+func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, markerIssues map[string]Issue, issueByTaskID map[string]Issue, claimedIssues map[string]string, resolved ResolvedTasks) (imported int, linked map[string]Issue, err error) {
 	clean, reason, err := a.Git.RootBranchClean(ctx, cfg.Root, cfg.MainBranch)
 	if err != nil {
 		return 0, nil, err
 	}
-	linked := map[string]Issue{}
-	imported := 0
+	linked = map[string]Issue{}
+	defer func() {
+		if imported > 0 && cfg.Inbox.Push && !cfg.DryRun {
+			if pushErr := a.Backlog.Push(ctx, cfg.Root, cfg.MainBranch); pushErr != nil {
+				a.Logf("warning: push %s failed after inbox import: %v", cfg.MainBranch, pushErr)
+			}
+		}
+	}()
 	for _, issue := range issues {
 		if issue.PullRequest != nil || issue.State != "open" || !hasLabelFold(issue, cfg.Inbox.Label) {
 			continue
 		}
-		if id, ok := ParseMarker(issue.Body); ok {
+		if id, ok := ParseMarkerWithPrefix(issue.Body, cfg.TaskPrefix); ok {
 			labels := removeLabelFold(LabelsOf(issue), cfg.Inbox.Label)
 			patch := IssuePatch{Labels: &labels}
 			a.LogAction(cfg.DryRun, "remove inbox label from mirrored issue %s#%d (%s)", issue.Repo, issue.Number, id)
+			updated := issue
 			if !cfg.DryRun {
-				if _, err := a.GitHub.UpdateIssue(ctx, issue.Repo, issue.Number, patch); err != nil {
+				updated, err = a.GitHub.UpdateIssue(ctx, issue.Repo, issue.Number, patch)
+				if err != nil {
 					return imported, linked, err
 				}
+			}
+			updated.Repo = issue.Repo
+			markerIssues[id] = updated
+			issueByTaskID[id] = updated
+			linked[id] = updated
+			if key := issueClaimKey(updated); key != "" {
+				claimedIssues[key] = id
 			}
 			continue
 		}
@@ -410,14 +443,31 @@ func (a App) processInbox(ctx context.Context, cfg Config, issues []Issue, marke
 			issueURL = fmt.Sprintf("https://github.com/%s/issues/%d", issue.Repo, issue.Number)
 		}
 		taskID := findTaskByReference(resolved.Tasks, issueURL)
+		canonicalTaskID := CanonicalTaskID(taskID)
+		if taskID != "" {
+			if existing, ok := markerIssues[canonicalTaskID]; ok && !sameIssue(existing, issue) {
+				a.Logf("warning: refusing to mark inbox issue %s#%d for %s because %s already has %s#%d; removing only inbox label", issue.Repo, issue.Number, canonicalTaskID, canonicalTaskID, existing.Repo, existing.Number)
+				if err := a.stripInboxLabel(ctx, cfg, issue); err != nil {
+					return imported, linked, err
+				}
+				continue
+			}
+			if owner, claimed := claimedIssues[issueClaimKey(issue)]; claimed && owner != canonicalTaskID {
+				a.Logf("warning: refusing to mark inbox issue %s#%d for %s because it is already claimed by %s; removing only inbox label", issue.Repo, issue.Number, canonicalTaskID, owner)
+				if err := a.stripInboxLabel(ctx, cfg, issue); err != nil {
+					return imported, linked, err
+				}
+				continue
+			}
+		}
 		if taskID == "" {
 			description := strings.TrimSpace(issue.Body)
 			project := cfg.ProjectForRepo(issue.Repo)
 			if cfg.DryRun {
 				a.Logf("would create task from %s#%d", issue.Repo, issue.Number)
-				taskID = "TASK-DRY-RUN"
+				taskID = strings.ToUpper(cfg.TaskPrefix) + "-DRY-RUN"
 			} else {
-				id, err := a.Backlog.CreateTask(ctx, cfg.Root, CreateTaskInput{Title: issue.Title, Description: description, Labels: []string{}, Project: project, References: []string{issueURL}})
+				id, err := a.Backlog.CreateTask(ctx, cfg.Root, CreateTaskInput{Title: issue.Title, Description: description, Labels: []string{}, Project: project, References: []string{issueURL}, TaskPrefix: cfg.TaskPrefix})
 				if err != nil {
 					return imported, linked, err
 				}
@@ -440,13 +490,35 @@ func (a App) processInbox(ctx context.Context, cfg Config, issues []Issue, marke
 		}
 		updated.Repo = issue.Repo
 		linked[CanonicalTaskID(taskID)] = updated
-	}
-	if imported > 0 && cfg.Inbox.Push && !cfg.DryRun {
-		if err := a.Backlog.Push(ctx, cfg.Root, cfg.MainBranch); err != nil {
-			a.Logf("warning: push %s failed after inbox import: %v", cfg.MainBranch, err)
+		markerIssues[CanonicalTaskID(taskID)] = updated
+		issueByTaskID[CanonicalTaskID(taskID)] = updated
+		if key := issueClaimKey(updated); key != "" {
+			claimedIssues[key] = CanonicalTaskID(taskID)
 		}
 	}
 	return imported, linked, nil
+}
+
+func (a *App) stripInboxLabel(ctx context.Context, cfg Config, issue Issue) error {
+	labels := removeLabelFold(LabelsOf(issue), cfg.Inbox.Label)
+	patch := IssuePatch{Labels: &labels}
+	a.LogAction(cfg.DryRun, "remove inbox label from extra issue %s#%d", issue.Repo, issue.Number)
+	if cfg.DryRun {
+		return nil
+	}
+	_, err := a.GitHub.UpdateIssue(ctx, issue.Repo, issue.Number, patch)
+	return err
+}
+
+func issueClaimKey(issue Issue) string {
+	if issue.Repo == "" || issue.Number == 0 {
+		return ""
+	}
+	return strings.ToLower(fmt.Sprintf("%s#%d", issue.Repo, issue.Number))
+}
+
+func sameIssue(a, b Issue) bool {
+	return a.Number != 0 && b.Number != 0 && strings.EqualFold(a.Repo, b.Repo) && a.Number == b.Number
 }
 
 func findTaskByReference(tasks []Task, issueURL string) string {
@@ -460,7 +532,7 @@ func findTaskByReference(tasks []Task, issueURL string) string {
 	return ""
 }
 
-func (a App) adoptReferencedIssues(cfg Config, resolved ResolvedTasks, issues []Issue, markerIssues map[string]Issue, issueByTaskID map[string]Issue) {
+func (a *App) adoptReferencedIssues(cfg Config, resolved ResolvedTasks, issues []Issue, markerIssues map[string]Issue, issueByTaskID map[string]Issue, claimedIssues map[string]string) {
 	if !cfg.AdoptReferencedIssues {
 		return
 	}
@@ -486,19 +558,35 @@ func (a App) adoptReferencedIssues(cfg Config, resolved ResolvedTasks, issues []
 		}
 		sort.Ints(nums)
 		if len(nums) > 1 {
-			a.Logf("warning: multiple adoptable references for %s; using lowest #%d", id, nums[0])
+			a.Logf("warning: multiple adoptable references for %s; considering lowest unclaimed issue", id)
 		}
-		issue, ok := byRepoNum[strings.ToLower(fmt.Sprintf("%s#%d", target, nums[0]))]
-		if !ok {
+		var chosen Issue
+		for _, num := range nums {
+			issue, ok := byRepoNum[strings.ToLower(fmt.Sprintf("%s#%d", target, num))]
+			if !ok {
+				continue
+			}
+			key := issueClaimKey(issue)
+			if owner, claimed := claimedIssues[key]; claimed && owner != id {
+				a.Logf("warning: refusing to adopt %s#%d for %s because it is already claimed by %s", target, num, id, owner)
+				continue
+			}
+			chosen = issue
+			break
+		}
+		if chosen.Number == 0 {
 			continue
 		}
-		if other, ok := ParseMarker(issue.Body); ok && other != id {
-			a.Logf("warning: refusing to adopt %s#%d for %s because it already has marker %s", target, nums[0], id, other)
+		if other, ok := ParseMarkerWithPrefix(chosen.Body, cfg.TaskPrefix); ok && other != id {
+			a.Logf("warning: refusing to adopt %s#%d for %s because it already has marker %s", target, chosen.Number, id, other)
 			continue
 		}
-		a.Logf("adopt referenced issue %s#%d for %s", target, nums[0], id)
-		markerIssues[id] = issue
-		issueByTaskID[id] = issue
+		a.LogAction(cfg.DryRun, "adopt referenced issue %s#%d for %s", target, chosen.Number, id)
+		markerIssues[id] = chosen
+		issueByTaskID[id] = chosen
+		if key := issueClaimKey(chosen); key != "" {
+			claimedIssues[key] = id
+		}
 	}
 }
 
@@ -520,7 +608,7 @@ func parseIssueURL(raw string) (string, int, bool) {
 
 type projectChangeCounts struct{ status, fields int }
 
-func (a App) syncProjectFields(ctx context.Context, cfg Config, project ProjectInfo, item ProjectItem, task Task, milestones map[string]string, issue Issue) (projectChangeCounts, error) {
+func (a *App) syncProjectFields(ctx context.Context, cfg Config, project ProjectInfo, item ProjectItem, task Task, milestones map[string]string, issue Issue) (projectChangeCounts, error) {
 	var counts projectChangeCounts
 	if item.ID == "" {
 		return counts, nil
@@ -574,6 +662,19 @@ func (a App) syncProjectFields(ctx context.Context, cfg Config, project ProjectI
 			}
 			counts.fields++
 		} else {
+			if desired.text == "" {
+				if current.OptionID == "" && current.Name == "" {
+					continue
+				}
+				a.LogAction(cfg.DryRun, "clear project field %q for issue %s#%d", desired.fieldName, issue.Repo, issue.Number)
+				if !cfg.DryRun {
+					if err := a.GitHub.ClearProjectField(ctx, project.ID, item.ID, field.ID); err != nil {
+						return counts, err
+					}
+				}
+				counts.fields++
+				continue
+			}
 			optionID := optionIDCaseInsensitive(field.Options, desired.text)
 			if optionID == "" {
 				a.Logf("warning: project field %q has no option %q; not auto-adding options to avoid clearing existing values", desired.fieldName, desired.text)
@@ -626,7 +727,7 @@ func optionIDCaseInsensitive(options map[string]string, name string) string {
 	return ""
 }
 
-func (a App) logDryRunFieldSets(cfg Config, project ProjectInfo, task Task, milestones map[string]string) int {
+func (a *App) logDryRunFieldSets(cfg Config, project ProjectInfo, task Task, milestones map[string]string) int {
 	count := 0
 	for _, desired := range desiredProjectFieldValues(cfg, task, milestones) {
 		if desired.fieldName == "" || desired.text == "" {
@@ -641,7 +742,7 @@ func (a App) logDryRunFieldSets(cfg Config, project ProjectInfo, task Task, mile
 	return count
 }
 
-func (a App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTasks, issueByTaskID map[string]Issue) int {
+func (a *App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTasks, issueByTaskID map[string]Issue) int {
 	warned := map[string]bool{}
 	linked := 0
 	for _, task := range resolved.Tasks {
@@ -661,16 +762,23 @@ func (a App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTas
 			a.warnOnce(warned, "parent-read", "warning: read sub-issue parent failed: %v", err)
 			continue
 		}
-		if current == parent.NodeID {
+		if current.ID == parent.NodeID {
 			continue
 		}
-		if current != "" {
-			a.LogAction(cfg.DryRun, "remove existing sub-issue parent for %s#%d", child.Repo, child.Number)
+		if current.ID != "" {
+			if !cfg.RepoAllowed(current.Repo) {
+				a.warnOnce(warned, "foreign-parent-"+current.Repo, "warning: refusing to remove foreign sub-issue parent %s#%d for %s#%d; skipping link", current.Repo, current.Number, child.Repo, child.Number)
+				continue
+			}
+			a.LogAction(cfg.DryRun, "remove existing sub-issue parent %s#%d for %s#%d", current.Repo, current.Number, child.Repo, child.Number)
 		}
 		a.LogAction(cfg.DryRun, "link %s#%d under parent %s#%d", child.Repo, child.Number, parent.Repo, parent.Number)
 		if !cfg.DryRun {
-			if current != "" {
-				_ = a.GitHub.RemoveSubIssue(ctx, current, child.NodeID)
+			if current.ID != "" {
+				if err := a.GitHub.RemoveSubIssue(ctx, current.ID, child.NodeID); err != nil {
+					a.warnOnce(warned, "remove-"+current.Repo, "warning: remove sub-issue parent failed for %s#%d from %s#%d: %v", child.Repo, child.Number, current.Repo, current.Number, err)
+					continue
+				}
 			}
 			if err := a.GitHub.AddSubIssue(ctx, parent.Repo, parent.Number, child.DatabaseID); err != nil {
 				a.warnOnce(warned, "add-"+parent.Repo, "warning: sub-issue link failed for %s#%d under %s#%d: %v", child.Repo, child.Number, parent.Repo, parent.Number, err)
@@ -682,14 +790,14 @@ func (a App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTas
 	return linked
 }
 
-func (a App) ensureLabel(ctx context.Context, cfg Config, repo, label string) error {
+func (a *App) ensureLabel(ctx context.Context, cfg Config, repo, label string) error {
 	if cfg.DryRun {
 		a.Logf("would create label %q in %s if missing", label, repo)
 		return nil
 	}
 	return a.GitHub.EnsureLabel(ctx, repo, label)
 }
-func (a App) LogAction(dryRun bool, format string, args ...any) {
+func (a *App) LogAction(dryRun bool, format string, args ...any) {
 	prefix := ""
 	if dryRun {
 		prefix = "would "
@@ -701,7 +809,7 @@ func (a App) LogAction(dryRun bool, format string, args ...any) {
 	}
 	a.Logf("%s%s", prefix, msg)
 }
-func (a App) verboseOnce(cfg Config, key, format string, args ...any) {
+func (a *App) verboseOnce(cfg Config, key, format string, args ...any) {
 	if !cfg.Verbose {
 		return
 	}
@@ -714,7 +822,7 @@ func (a App) verboseOnce(cfg Config, key, format string, args ...any) {
 	a.verboseSeen[key] = true
 	a.Logf(format, args...)
 }
-func (a App) warnOnce(seen map[string]bool, key, format string, args ...any) {
+func (a *App) warnOnce(seen map[string]bool, key, format string, args ...any) {
 	if seen[key] {
 		return
 	}

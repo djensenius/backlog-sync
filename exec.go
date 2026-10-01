@@ -163,7 +163,7 @@ func (b ExecBacklog) CreateTask(ctx context.Context, dir string, in CreateTaskIn
 	if err != nil {
 		return "", err
 	}
-	match := regexp.MustCompile(`(?i)\bTASK-[0-9]+(?:\.[0-9]+)*\b`).FindString(string(out))
+	match := taskIDRegexp(in.TaskPrefix).FindString(string(out))
 	if match == "" {
 		return "", errors.New("created task response did not include task id")
 	}
@@ -181,6 +181,7 @@ type CreateTaskInput struct {
 	Labels      []string
 	Project     string
 	References  []string
+	TaskPrefix  string
 }
 
 type ExecGit struct{ Runner CommandRunner }
@@ -218,7 +219,7 @@ func (g ExecGit) RootBranchClean(ctx context.Context, root, mainBranch string) (
 			return false, fmt.Sprintf("git operation in progress: %s", sentinel), nil
 		}
 	}
-	if out, err := g.Runner.Run(ctx, "", "git", []string{"-C", root, "status", "--porcelain=v1"}, nil); err != nil {
+	if out, err := g.Runner.Run(ctx, "", "git", []string{"--no-optional-locks", "-C", root, "status", "--porcelain=v1"}, nil); err != nil {
 		return false, "", err
 	} else if strings.TrimSpace(string(out)) != "" {
 		return false, "root worktree or index is dirty", nil
@@ -542,29 +543,33 @@ func (g ExecGitHub) ClearProjectField(ctx context.Context, projectID, itemID, fi
 	_, err := g.ghJSON(ctx, []string{"api", "graphql", "--input", "-"}, payload)
 	return err
 }
-func (g ExecGitHub) IssueParent(ctx context.Context, issueNodeID string) (string, error) {
-	query := `query($id:ID!) { node(id:$id) { ... on Issue { parent { id } } } }`
+func (g ExecGitHub) IssueParent(ctx context.Context, issueNodeID string) (IssueParentInfo, error) {
+	query := `query($id:ID!) { node(id:$id) { ... on Issue { parent { id number repository { nameWithOwner } } } } }`
 	payload := map[string]any{"query": query, "variables": map[string]any{"id": issueNodeID}}
 	out, err := g.ghJSON(ctx, []string{"api", "graphql", "--input", "-"}, payload)
 	if err != nil {
-		return "", err
+		return IssueParentInfo{}, err
 	}
 	var resp struct {
 		Data struct {
 			Node struct {
 				Parent *struct {
-					ID string `json:"id"`
+					ID         string `json:"id"`
+					Number     int    `json:"number"`
+					Repository struct {
+						NameWithOwner string `json:"nameWithOwner"`
+					} `json:"repository"`
 				} `json:"parent"`
 			} `json:"node"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
-		return "", err
+		return IssueParentInfo{}, err
 	}
 	if resp.Data.Node.Parent == nil {
-		return "", nil
+		return IssueParentInfo{}, nil
 	}
-	return resp.Data.Node.Parent.ID, nil
+	return IssueParentInfo{ID: resp.Data.Node.Parent.ID, Number: resp.Data.Node.Parent.Number, Repo: resp.Data.Node.Parent.Repository.NameWithOwner}, nil
 }
 func (g ExecGitHub) AddSubIssue(ctx context.Context, parentRepo string, parentNumber int, childDatabaseID int64) error {
 	if err := g.checkRepo(parentRepo); err != nil {

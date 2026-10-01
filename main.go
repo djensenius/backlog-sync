@@ -8,7 +8,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +19,9 @@ import (
 func main() {
 	cfg, err := parseFlags(os.Args[1:])
 	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(0)
+		}
 		logf("error: %v", err)
 		os.Exit(2)
 	}
@@ -45,7 +47,7 @@ func main() {
 
 func parseFlags(args []string) (Config, error) {
 	fs := flag.NewFlagSet("backlog-sync", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	fs.SetOutput(os.Stdout)
 	var rootFlag, configFlag, repoFlag, ownerFlag, ownerTypeFlag, mainBranchFlag string
 	var projectNumberFlag int
 	var dryRun, noInbox, verbose bool

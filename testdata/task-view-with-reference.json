@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "kind": "task-view",
+  "task": {
+    "id": "TASK-17",
+    "title": "Synthetic reference fixture",
+    "status": "In Progress",
+    "type": null,
+    "priority": "high",
+    "project": "apple",
+    "assignees": [],
+    "reporter": null,
+    "labels": [],
+    "milestone": null,
+    "parentTaskId": null,
+    "acceptanceCriteriaCompleted": 0,
+    "acceptanceCriteriaCount": 0,
+    "references": [
+      "https://github.com/owner/repo/issues/123"
+    ],
+    "modifiedFiles": [],
+    "ordinal": 27000,
+    "createdAt": "2026-10-01T03:12:00Z",
+    "updatedAt": null,
+    "dueDate": null,
+    "isReady": true,
+    "path": "backlog/tasks/task-17 - Synthetic-reference-fixture.md",
+    "description": "Synthetic description.",
+    "dependencies": [],
+    "dependencyGraph": {
+      "root": "TASK-17",
+      "nodes": [
+        {
+          "id": "TASK-17",
+          "title": "Synthetic reference fixture",
+          "status": "In Progress",
+          "state": "resolved",
+          "completed": false,
+          "dependencyDepth": 0,
+          "dependentDepth": 0
+        }
+      ],
+      "edges": []
+    },
+    "readiness": {
+      "isReady": true,
+      "isBlocked": false,
+      "blockingDependencies": [],
+      "missingDependencies": []
+    },
+    "documentation": [],
+    "subtasks": [],
+    "acceptanceCriteria": [],
+    "definitionOfDone": [],
+    "implementationPlan": "Synthetic plan.",
+    "implementationNotes": "Synthetic notes.",
+    "comments": [],
+    "finalSummary": null
+  }
+}

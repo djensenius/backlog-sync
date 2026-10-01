@@ -37,12 +37,13 @@ type GitHub interface {
 	UpdateProjectSingleSelect(ctx context.Context, projectID, itemID, fieldID, optionID string) error
 	UpdateProjectText(ctx context.Context, projectID, itemID, fieldID, text string) error
 	ClearProjectField(ctx context.Context, projectID, itemID, fieldID string) error
-	IssueParent(ctx context.Context, issueNodeID string) (string, error)
+	IssueParent(ctx context.Context, issueNodeID string) (IssueParentInfo, error)
 	AddSubIssue(ctx context.Context, parentRepo string, parentNumber int, childDatabaseID int64) error
 	RemoveSubIssue(ctx context.Context, parentNodeID string, childNodeID string) error
 }
 
-func CollectTasks(ctx context.Context, root string, git Git, backlog Backlog, logf func(string, ...any)) (ResolvedTasks, error) {
+func CollectTasks(ctx context.Context, cfg Config, git Git, backlog Backlog, logf func(string, ...any)) (ResolvedTasks, error) {
+	root := cfg.Root
 	worktrees, err := git.Worktrees(ctx, root)
 	if err != nil {
 		return ResolvedTasks{}, err
@@ -99,7 +100,7 @@ func CollectTasks(ctx context.Context, root string, git Git, backlog Backlog, lo
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
-		winner := ResolveTaskCopy(id, copies[id], statusRank, root)
+		winner := ResolveTaskCopyWithPrefix(id, copies[id], statusRank, root, cfg.TaskPrefix)
 		resolved.Tasks = append(resolved.Tasks, winner.Task)
 		resolved.ByID[id] = winner.Task
 		resolved.BranchByID[id] = winner.Worktree.Branch
@@ -117,9 +118,12 @@ func listAllTasks(ctx context.Context, backlog Backlog, dir string) ([]TaskSumma
 			return nil, err
 		}
 		out = append(out, page.Tasks...)
+		if page.Total == nil {
+			return nil, fmt.Errorf("pagination response missing total")
+		}
 		if page.NextSkip == nil {
-			if page.Total != 0 && len(out) != page.Total {
-				return nil, fmt.Errorf("pagination ended with %d tasks but total is %d", len(out), page.Total)
+			if len(out) != *page.Total {
+				return nil, fmt.Errorf("pagination ended with %d tasks but total is %d", len(out), *page.Total)
 			}
 			break
 		}
@@ -142,11 +146,15 @@ func shouldSkipWorktree(wt Worktree) bool {
 }
 
 func ResolveTaskCopy(id string, copies []TaskCopy, statusRank map[string]int, root string) TaskCopy {
+	return ResolveTaskCopyWithPrefix(id, copies, statusRank, root, "task")
+}
+
+func ResolveTaskCopyWithPrefix(id string, copies []TaskCopy, statusRank map[string]int, root, taskPrefix string) TaskCopy {
 	if len(copies) == 0 {
 		return TaskCopy{}
 	}
 	for _, copy := range copies {
-		if BranchOwnsTask(id, copy.Worktree.Branch) {
+		if BranchOwnsTaskWithPrefix(id, copy.Worktree.Branch, taskPrefix) {
 			return copy
 		}
 	}
@@ -174,9 +182,14 @@ func ResolveTaskCopy(id string, copies []TaskCopy, statusRank map[string]int, ro
 	return copies[0]
 }
 
-func BranchOwnsTask(id, branch string) bool {
+func BranchOwnsTask(id, branch string) bool { return BranchOwnsTaskWithPrefix(id, branch, "task") }
+
+func BranchOwnsTaskWithPrefix(id, branch, taskPrefix string) bool {
 	id = CanonicalTaskID(id)
 	branch = strings.ToLower(branch)
+	if !taskIDRegexp(taskPrefix).MatchString(id) {
+		return false
+	}
 	return branch == id || strings.HasPrefix(branch, id+"-")
 }
 

@@ -10,8 +10,6 @@ import (
 
 const mirrorNotice = "Mirrored one-way from Backlog.md — edits here are overwritten. Change it with the backlog CLI."
 
-var markerRE = regexp.MustCompile(`^<!-- backlog:(task-[0-9]+(?:\.[0-9]+)*) -->$`)
-
 type Config struct {
 	Root                  string            `json:"root"`
 	ConfigPath            string            `json:"-"`
@@ -78,7 +76,7 @@ type TaskSummary struct {
 
 type TaskListResponse struct {
 	Tasks    []TaskSummary `json:"tasks"`
-	Total    int           `json:"total"`
+	Total    *int          `json:"total"`
 	NextSkip *int          `json:"nextSkip"`
 }
 
@@ -174,6 +172,12 @@ type ProjectItem struct {
 	Status         string
 	StatusOptionID string
 	FieldValues    map[string]ProjectFieldValue
+}
+
+type IssueParentInfo struct {
+	ID     string
+	Number int
+	Repo   string
 }
 
 type TaskCopy struct {
@@ -285,7 +289,25 @@ func UpperTaskID(id string) string     { return strings.ToUpper(strings.TrimSpac
 func IssueTitle(task Task) string { return fmt.Sprintf("%s: %s", CanonicalTaskID(task.ID), task.Title) }
 func MarkerFor(id string) string  { return fmt.Sprintf("<!-- backlog:%s -->", CanonicalTaskID(id)) }
 
-func ParseMarker(body string) (string, bool) {
+func markerRegexp(prefix string) *regexp.Regexp {
+	prefix = strings.ToLower(strings.TrimSpace(prefix))
+	if prefix == "" {
+		prefix = "task"
+	}
+	return regexp.MustCompile(`^<!-- backlog:(` + regexp.QuoteMeta(prefix) + `-[0-9]+(?:\.[0-9]+)*) -->$`)
+}
+
+func taskIDRegexp(prefix string) *regexp.Regexp {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		prefix = "task"
+	}
+	return regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(prefix) + `-[0-9]+(?:\.[0-9]+)*\b`)
+}
+
+func ParseMarker(body string) (string, bool) { return ParseMarkerWithPrefix(body, "task") }
+
+func ParseMarkerWithPrefix(body, prefix string) (string, bool) {
 	if body == "" {
 		return "", false
 	}
@@ -293,7 +315,7 @@ func ParseMarker(body string) (string, bool) {
 	if idx := strings.IndexByte(body, '\n'); idx >= 0 {
 		line = body[:idx]
 	}
-	match := markerRE.FindStringSubmatch(strings.TrimRight(line, "\r"))
+	match := markerRegexp(prefix).FindStringSubmatch(strings.TrimRight(line, "\r"))
 	if match == nil {
 		return "", false
 	}
