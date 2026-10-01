@@ -34,6 +34,14 @@ run = "go build ./..."
 description = "Run workflow and shell linters"
 run = "actionlint && shellcheck install-launchd.sh"
 
+[tasks."release:check"]
+description = "Validate GoReleaser configuration"
+run = "goreleaser check"
+
+[tasks."release:snapshot"]
+description = "Build a local GoReleaser snapshot"
+run = "goreleaser release --snapshot --clean"
+
 [tasks.ci]
 description = "Run all CI checks"
 depends = ["fmt:check", "module:check", "vet", "test", "build", "lint"]
