@@ -1,11 +1,11 @@
 ---
 id: TASK-2
 title: 'CI workflow with mise tasks, like gopod'
-status: In Progress
+status: Done
 assignee:
   - '@david'
 created_date: '2026-10-01 15:18'
-updated_date: '2026-10-01 17:05'
+updated_date: '2026-10-01 17:23'
 labels:
   - ci
 milestone: m-0
@@ -21,10 +21,10 @@ Every PR must be checked automatically before merge, on both platforms the tool 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 mise.toml pins Go and tools (actionlint, goreleaser, shellcheck) and defines fmt:check, module:check, vet, test, build, lint and ci tasks, mirroring gopod where it applies
-- [ ] #2 `.github/workflows/go.yml` runs `mise run ci` on ubuntu-latest and macos-latest for pull requests and pushes to main, with least-privilege permissions and actions pinned to full commit SHAs
-- [ ] #3 CodeQL (Go) runs on PRs and on a schedule
-- [ ] #4 shellcheck covers install-launchd.sh
+- [x] #1 mise.toml pins Go and tools (actionlint, goreleaser, shellcheck) and defines fmt:check, module:check, vet, test, build, lint and ci tasks, mirroring gopod where it applies
+- [x] #2 `.github/workflows/go.yml` runs `mise run ci` on ubuntu-latest and macos-latest for pull requests and pushes to main, with least-privilege permissions and actions pinned to full commit SHAs
+- [x] #3 CodeQL (Go) runs on PRs and on a schedule
+- [x] #4 shellcheck covers install-launchd.sh
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -46,4 +46,15 @@ Check evidence:
 - `mise run ci`: succeeded; ran `[test] $ go test ./...`, `[fmt:check] $ files=$(gofmt -l .)`, `[vet] $ go vet ./...`, `[module:check] $ go mod tidy -diff`, `[build] $ go build ./...`, and `[lint] $ actionlint && shellcheck install-launchd.sh`; output ended `Finished in 885.1ms`.
 - `go vet ./...`: succeeded with no output.
 - `go test ./...`: succeeded with `ok  	github.com/djensenius/backlog-sync	(cached)`.
+
+Coordinator final validation after PR #2 opened:
+- `mise run ci` succeeded locally; output included `go test ./...`, gofmt check, `go vet ./...`, `go mod tidy -diff`, `go build ./...`, `actionlint`, and `shellcheck install-launchd.sh`, ending `Finished in 743.6ms`.
+- GitHub Actions on PR #2 passed `CI (ubuntu-latest)`, `CI (macos-latest)`, CodeQL `Analyze Go`, and the CodeQL result check.
+- Independent reviewer returned APPROVE WITH NOTES with no blocking findings.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added mise-pinned local/CI checks plus Go and CodeQL GitHub Actions workflows. Verified with local `mise run ci`, `go test ./...`, `go vet ./...`, and PR #2 GitHub Actions passing on ubuntu-latest, macos-latest, and CodeQL.
+<!-- SECTION:FINAL_SUMMARY:END -->
