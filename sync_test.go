@@ -961,7 +961,6 @@ func TestExecParsersAndJSONShapes(t *testing.T) {
 	if err != nil || parent.Repo != "owner/repo" || parent.Number != 4 || parent.ID != "PARENT" {
 		t.Fatalf("IssueParent parse=%+v err=%v", parent, err)
 	}
-
 }
 
 func TestTaskViewJSONFixtureFieldNames(t *testing.T) {
@@ -1071,31 +1070,26 @@ func (g fakeGit) RootBranchClean(context.Context, string, string) (bool, string,
 }
 
 type fakeBacklog struct {
-	statuses            []string
-	tasksByDir          map[string][]Task
-	createdID           string
-	created             []Task
-	createDirs          []string
-	pushed              bool
-	pushCount           int
-	badTotal            bool
-	missingTotal        bool
-	taskPrefix          string
-	taskPrefixErr       error
-	statusErr           error
-	createErr           error
-	viewErr             error
-	tasksForUnknownDirs []Task
+	statuses      []string
+	tasksByDir    map[string][]Task
+	createdID     string
+	created       []Task
+	pushed        bool
+	pushCount     int
+	badTotal      bool
+	missingTotal  bool
+	taskPrefix    string
+	taskPrefixErr error
+	statusErr     error
+	createErr     error
+	viewErr       error
 }
 
 func newFakeBacklog(root string, tasks ...Task) *fakeBacklog {
 	return &fakeBacklog{statuses: []string{"To Do", "In Progress", "Done"}, tasksByDir: map[string][]Task{root: tasks}, createdID: "TASK-99"}
 }
 func (b *fakeBacklog) ListTasks(_ context.Context, dir string, maxCount, skip int) (TaskListResponse, error) {
-	tasks, ok := b.tasksByDir[dir]
-	if !ok {
-		tasks = b.tasksForUnknownDirs
-	}
+	tasks := b.tasksByDir[dir]
 	if skip > len(tasks) {
 		skip = len(tasks)
 	}
@@ -1126,10 +1120,7 @@ func (b *fakeBacklog) ViewTask(_ context.Context, dir, id string) (TaskViewRespo
 	if b.viewErr != nil {
 		return TaskViewResponse{}, b.viewErr
 	}
-	tasks, ok := b.tasksByDir[dir]
-	if !ok {
-		tasks = b.tasksForUnknownDirs
-	}
+	tasks := b.tasksByDir[dir]
 	for _, task := range tasks {
 		if CanonicalTaskID(task.ID) == CanonicalTaskID(id) {
 			return TaskViewResponse{Task: task}, nil
@@ -1162,7 +1153,6 @@ func (b *fakeBacklog) CreateTask(_ context.Context, dir string, in CreateTaskInp
 	p := in.Project
 	task := Task{ID: b.createdID, Title: in.Title, Description: in.Description, Labels: in.Labels, Status: "To Do", Project: &p, References: in.References}
 	b.created = append(b.created, task)
-	b.createDirs = append(b.createDirs, dir)
 	b.tasksByDir[dir] = append(b.tasksByDir[dir], task)
 	return b.createdID, nil
 }
@@ -1170,12 +1160,6 @@ func (b *fakeBacklog) Push(context.Context, string, string) error {
 	b.pushed = true
 	b.pushCount++
 	return nil
-}
-func firstDir(m map[string][]Task) string {
-	for k := range m {
-		return k
-	}
-	return ""
 }
 
 type fakeGitHub struct {
@@ -1369,7 +1353,6 @@ func (g *fakeGitHub) resetWriteCounters() {
 	g.addSubIssueCalls = 0
 	g.removeSubIssueCalls = 0
 }
-
 func (g *fakeGitHub) writeCalls() int {
 	return len(g.updatedIssues) + len(g.createdIssues) + g.ensureLabelCalls + g.addProjectItemCalls + g.updateProjectStatusCalls + g.fieldUpdates + g.addSubIssueCalls + g.removeSubIssueCalls
 }
