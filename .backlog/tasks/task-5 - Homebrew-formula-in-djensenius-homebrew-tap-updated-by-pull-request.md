@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@david'
 created_date: '2026-10-01 15:18'
-updated_date: '2026-10-01 18:19'
+updated_date: '2026-10-01 18:28'
 labels:
   - release
 milestone: m-0
@@ -35,6 +35,8 @@ The owner installs Backlog.md with Homebrew and wants backlog-sync distributed t
 2. Add deterministic formula/README update generation for djensenius/homebrew-tap using release assets/checksums, with dry-run/local validation where possible.
 3. Add or document validation commands for the generated formula and `backlog-sync --version` test path, without committing any secret.
 4. Leave token-dependent and first-release-only acceptance evidence (actual tap PR creation and `brew install djensenius/tap/backlog-sync`) clearly noted as blocked until the owner stores the token and a stable release exists.
+
+5. Review blocker follow-up: split .github/workflows/release.yml so tag pushes publish only the draft release/local preview, while release.published events for stable tags download public checksums, update the tap branch, and open or report the tap PR with rerun-safe branch/PR handling.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
