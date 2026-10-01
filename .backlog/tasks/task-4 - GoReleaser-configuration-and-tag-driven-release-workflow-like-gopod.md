@@ -1,11 +1,11 @@
 ---
 id: TASK-4
 title: 'GoReleaser configuration and tag-driven release workflow, like gopod'
-status: In Progress
+status: Done
 assignee:
   - '@david'
 created_date: '2026-10-01 15:18'
-updated_date: '2026-10-01 17:35'
+updated_date: '2026-10-01 17:38'
 labels:
   - ci
   - release
@@ -24,10 +24,10 @@ Users and other machines should install a tagged, checksummed binary instead of 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 `.goreleaser.yaml` (v2) builds `darwin/amd64`, `darwin/arm64`, `linux/amd64` and `linux/arm64` with `CGO` off, `-trimpath`, reproducible timestamps, `tar.gz` archives (`README`, `LICENSE`, launchd template, install script) and `checksums.txt`
-- [ ] #2 `.github/workflows/release.yml` publishes only semver tags that point to a commit on `main`, as a draft release (gopod's validation and draft flow)
-- [ ] #3 `mise run release:check` and `mise run release:snapshot` work locally
-- [ ] #4 A snapshot build's binary reports the injected version
+- [x] #1 `.goreleaser.yaml` (v2) builds `darwin/amd64`, `darwin/arm64`, `linux/amd64` and `linux/arm64` with `CGO` off, `-trimpath`, reproducible timestamps, `tar.gz` archives (`README`, `LICENSE`, launchd template, install script) and `checksums.txt`
+- [x] #2 `.github/workflows/release.yml` publishes only semver tags that point to a commit on `main`, as a draft release (gopod's validation and draft flow)
+- [x] #3 `mise run release:check` and `mise run release:snapshot` work locally
+- [x] #4 A snapshot build's binary reports the injected version
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -64,4 +64,18 @@ Follow-up validation from the task worktree:
 - `mise run ci`: `[test] ok  	github.com/djensenius/backlog-sync	0.224s`; `Finished in 556.3ms`.
 - `go test ./...`: `ok  	github.com/djensenius/backlog-sync	(cached)`.
 - `go vet ./...`: passed with no output.
+
+Coordinator final validation after reviewer follow-ups:
+- `mise run release:check` passed with `1 configuration file(s) validated` and finished in 80.2ms.
+- `mise run release:snapshot` passed, built darwin_amd64_v1, darwin_arm64_v8.0, linux_amd64_v1, and linux_arm64_v8.0, archived four tar.gz artifacts, calculated checksums, and reported `release succeeded after 1s`; snapshot version was `0.0.0-snapshot-5558e40`.
+- Snapshot binary `./dist/backlog-sync_darwin_arm64_v8.0/backlog-sync --version` printed `backlog-sync version=0.0.0-snapshot-5558e40 commit=5558e40dc5886281c55b86fc1ef34fde2a2ff25e date=2026-10-01T17:35:40Z`.
+- `dist/checksums.txt` has 4 entries, one per archive; darwin arm64 archive contains `backlog-sync`, `README.md`, `LICENSE`, `install-launchd.sh`, and `launchd/com.djensenius.canadian-ham.backlog-sync.plist` with root/root ownership and commit-time mtimes.
+- `mise run ci` passed; `go test ./...` passed with `ok   github.com/djensenius/backlog-sync 0.200s`; `go vet ./...` passed with no output; `actionlint .github/workflows/release.yml` passed with no findings.
+- Independent reviewer returned APPROVE WITH NOTES after follow-up fixes; remaining notes were non-blocking hardening/follow-ups.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added GoReleaser v2 configuration, local release check/snapshot mise tasks, and a pinned draft-release workflow that validates semver tags and ensures tagged commits are on main. Verified release config, all four snapshot archives/checksums/assets, injected snapshot version output, CI, go test, go vet, actionlint, and independent review.
+<!-- SECTION:FINAL_SUMMARY:END -->
