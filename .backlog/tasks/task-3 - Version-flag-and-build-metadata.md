@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@pi'
 created_date: '2026-10-01 15:18'
-updated_date: '2026-10-01 16:05'
+updated_date: '2026-10-01 16:45'
 labels:
   - cli
 milestone: m-0
@@ -21,9 +21,9 @@ Release archives and Homebrew need `backlog-sync --version` to report what's ins
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 `backlog-sync --version` prints version, commit and date (defaults for local builds)
-- [ ] #2 main.version, main.commit and main.date can be set with -ldflags -X
-- [ ] #3 A test covers the version output
+- [x] #1 `backlog-sync --version` prints version, commit and date (defaults for local builds)
+- [x] #2 main.version, main.commit and main.date can be set with -ldflags -X
+- [x] #3 A test covers the version output
 <!-- AC:END -->
 
 ## Implementation Plan
