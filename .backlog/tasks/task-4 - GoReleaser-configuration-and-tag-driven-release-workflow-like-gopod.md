@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@david'
 created_date: '2026-10-01 15:18'
-updated_date: '2026-10-01 17:48'
+updated_date: '2026-10-01 17:50'
 labels:
   - ci
   - release
@@ -100,10 +100,14 @@ Final validation after the cleanup commit:
 - `actionlint .github/workflows/release.yml`: passed with only the mise go directive deprecation warning.
 
 Final PR #3 clarity cleanup: README install docs now say tagged versions create draft GitHub releases, release archives are downloadable after draft publication, and Linux users can verify checksums with sha256sum -c. The consumer-specific launchd plist was replaced with the generic launchd/backlog-sync.plist.template in the release archive docs. Validation passed: mise run release:check; mise run ci; go test ./...; go vet ./...; actionlint .github/workflows/release.yml.
+
+Final reviewer pass after README clarity cleanup returned APPROVE WITH NOTES with no blocking findings. Notes were README usability suggestions only: extraction into a scratch directory/top-level archive folder and a clearer OS/arch asset hint. TASK-4 acceptance remains met; Copilot findings were addressed by replacing the consumer plist with `launchd/backlog-sync.plist.template` and updating release archive documentation.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
 Added GoReleaser v2 config, local release check/snapshot tasks, and a pinned draft-release workflow. Replaced the consumer launchd plist with the generic launchd/backlog-sync.plist.template and updated README install docs for published draft releases, checksum verification, extraction, --version, and dry-run. Verified with release checks, CI, go test, go vet, actionlint, snapshot archives/checksums/assets, and injected snapshot version output.
+
+PR #3 follow-up replaced the consumer-specific launchd plist with a reusable template and clarified release archive download/verification docs.
 <!-- SECTION:FINAL_SUMMARY:END -->
