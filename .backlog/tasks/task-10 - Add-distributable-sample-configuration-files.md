@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@david'
 created_date: '2026-10-01 16:03'
-updated_date: '2026-10-01 18:43'
+updated_date: '2026-10-01 18:45'
 labels:
   - docs
   - config
@@ -36,3 +36,9 @@ The tool is meant to be configured per consumer repository, but the repo current
 3. Update README/config docs to link to the committed examples instead of relying on divergent inline snippets.
 4. Validate with go test ./..., go vet ./..., mise run ci, and Markdown/link checks where practical.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implemented sample config files and validation on branch task-10-sample-configs. Added examples/minimal-single-repo.json and examples/multi-repo.json as pure JSON placeholders without root/lockFile absolute paths; README now links to those examples instead of inline JSON snippets. Added config_samples_test.go to verify samples are valid JSON and pass parseFlags strict loadConfig decode, Normalized defaults, and validateConfig with --root t.TempDir() (no network). Validation passed: go test ./... -> ok github.com/djensenius/backlog-sync 0.777s; go vet ./... -> no output; mise run ci -> fmt/module/vet/test/build/lint passed, test line ok github.com/djensenius/backlog-sync 0.447s; local Markdown link check -> checked local Markdown links in README.md and docs/*.md; README stale config snippet grep -> no matches.
+<!-- SECTION:NOTES:END -->
