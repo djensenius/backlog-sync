@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@david'
 created_date: '2026-10-01 15:18'
-updated_date: '2026-10-01 17:27'
+updated_date: '2026-10-01 17:30'
 labels:
   - ci
   - release
@@ -38,3 +38,19 @@ Users and other machines should install a tagged, checksummed binary instead of 
 3. Add a pinned release workflow that runs only for tag pushes, validates the tag as semver, verifies the tagged commit is contained in origin/main, and publishes a draft GoReleaser release.
 4. Verify locally with mise run release:check, mise run release:snapshot, snapshot binary --version output, mise run ci/go test/go vet, and actionlint.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implemented release workflow/config in commit ef72efac00bad6520ad4be8945369dfc3eef8363.
+
+Check evidence from the task worktree:
+- `mise run release:check`: `[release:check]   • 1 configuration file(s) validated`; `[release:check] Finished in 38.5ms`.
+- `mise run release:snapshot`: built `darwin_amd64_v1`, `darwin_arm64_v8.0`, `linux_arm64_v8.0`, and `linux_amd64_v1`; archived `backlog-sync_0.0.0-snapshot-ef72efa_{darwin_amd64,darwin_arm64,linux_amd64,linux_arm64}.tar.gz`; `release succeeded after 1s`.
+- Snapshot binary: `backlog-sync version=0.0.0-snapshot-ef72efa commit=ef72efac00bad6520ad4be8945369dfc3eef8363 date=2026-10-01T17:30:17Z`.
+- Archive/checksum spot check: `dist/checksums.txt` contains all four tar.gz archives; the darwin/arm64 tarball contains `backlog-sync`, `README.md`, `LICENSE`, `install-launchd.sh`, and `launchd/com.djensenius.canadian-ham.backlog-sync.plist`; tar metadata showed root/root ownership and commit-time mtimes.
+- `mise run ci`: `[test] ok  	github.com/djensenius/backlog-sync	0.171s`; `Finished in 514.4ms`.
+- `go test ./...`: `ok  	github.com/djensenius/backlog-sync	0.170s`.
+- `go vet ./...`: passed with no output.
+- `actionlint .github/workflows/release.yml`: passed with no output.
+<!-- SECTION:NOTES:END -->
