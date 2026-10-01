@@ -1,3 +1,3 @@
-module github.com/djensenius/canadian-ham/tools/backlog-sync
+module github.com/djensenius/backlog-sync
 
 go 1.27

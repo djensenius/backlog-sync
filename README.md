@@ -1,5 +1,7 @@
 # Backlog Sync
 
+> Extracted from [djensenius/canadian-ham](https://github.com/djensenius/canadian-ham) (`tools/backlog-sync`) with its history. The examples below still use canadian-ham and ArkhamHorror paths; a generic README is planned.
+
 `backlog-sync` mirrors local Backlog.md tasks to GitHub Issues and GitHub Project v2. Backlog.md remains the source of truth; GitHub edits are overwritten on the next sync except for the narrow `inbox` push import path.
 
 The binary is consumer-neutral. All repo/project choices come from a JSON config selected with `--config <path>` (default: `<root>/.backlog-sync.json`). Flags only override config fields for local testing.
@@ -140,12 +142,11 @@ All log lines are written to stdout with an RFC3339 timestamp prefix. Flag error
 Requires Go 1.27 or newer and the standard library only.
 
 ```bash
-cd /Users/david/Developer/canadian-ham/tools/backlog-sync
-go test ./...
-go vet ./...
-go build -o ~/bin/backlog-sync .
-~/bin/backlog-sync --config /Users/david/Developer/canadian-ham/.backlog-sync.json --dry-run
+go install github.com/djensenius/backlog-sync@latest   # or: git clone, then go build -o ~/bin/backlog-sync .
+backlog-sync --config /path/to/repo/.backlog-sync.json --dry-run
 ```
+
+From a checkout: `go test ./... && go vet ./... && go build -o ~/bin/backlog-sync .`. Release archives and a Homebrew formula are planned (see `.backlog/`).
 
 ArkhamHorror uses the same binary with a temporary or private config, for example:
 
