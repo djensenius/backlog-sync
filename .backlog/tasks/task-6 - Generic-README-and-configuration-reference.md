@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@david'
 created_date: '2026-10-01 15:18'
-updated_date: '2026-10-01 22:04'
+updated_date: '2026-10-01 22:07'
 labels:
   - docs
 milestone: m-0
@@ -36,3 +36,14 @@ The README was written while the tool lived inside canadian-ham and still uses t
 3. Add or run a local Markdown link check for README/docs/example links, and keep config docs aligned with current schema and sample files.
 4. Validate with go test ./..., go vet ./..., mise run ci, release:check, and link checks before finalizing.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implemented standalone generic README/config reference and added README link/stale-path checks. Evidence:
+- `go test ./...`: ok github.com/djensenius/backlog-sync 0.864s.
+- `go vet ./...`: passed with no output.
+- `mise run ci`: passed; test package ok and finished in 812.2ms (mise emitted go-directive deprecation warning).
+- `mise run release:check`: GoReleaser config validated (mise emitted go-directive deprecation warning).
+- `go test ./... -run 'TestReadme(LinksToSampleConfigs|LocalMarkdownLinksResolve|HasNoConsumerSpecificPaths)'`: ok 0.099s.\n- Stale path grep across README/examples/docs/launchd/install script: no `/Users/`, `canadian-ham`, or `ArkhamHorror` matches.
+<!-- SECTION:NOTES:END -->
