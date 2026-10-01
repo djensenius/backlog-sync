@@ -730,6 +730,70 @@ func TestCollectTasksSkipsTemporaryInboxWorktrees(t *testing.T) {
 	}
 }
 
+func TestCollectTasksSkipsTemporaryInboxWorktreeListedByResolvedSymlinkPath(t *testing.T) {
+	root := t.TempDir()
+	makeBacklogDataDir(t, filepath.Join(root, "backlog"))
+	realTmp := t.TempDir()
+	linkParent := t.TempDir()
+	linkTmp := filepath.Join(linkParent, "tmp-link")
+	if err := os.Symlink(realTmp, linkTmp); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	t.Setenv("TMPDIR", linkTmp)
+	tmpWorktree := filepath.Join(linkTmp, "backlog-sync-inbox-symlink", "worktree")
+	if err := os.MkdirAll(tmpWorktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	listedWorktree, err := filepath.EvalSymlinks(tmpWorktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeBacklogDataDir(t, filepath.Join(listedWorktree, "backlog"))
+	mainTask := sampleTask()
+	mainTask.ID = "TASK-1"
+	tmpTask := sampleTask()
+	tmpTask.ID = "TASK-999"
+	bl := &fakeBacklog{statuses: []string{"To Do", "In Progress", "Done"}, tasksByDir: map[string][]Task{root: {mainTask}, listedWorktree: {tmpTask}}, createdID: "TASK-99"}
+	resolved, err := CollectTasks(context.Background(), testConfig(root), fakeGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}, {Path: listedWorktree, Branch: "(detached)"}}}, bl, func(string, ...any) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved.Tasks) != 1 || resolved.ByID["task-999"].ID != "" {
+		t.Fatalf("temporary inbox worktree listed by resolved symlink path should be skipped, got %+v", resolved.ByID)
+	}
+}
+
+func TestInboxPRModeRemovesTemporaryWorktreesBeforeCollect(t *testing.T) {
+	ctx := context.Background()
+	root := tempRoot(t)
+	tmpParent, err := os.MkdirTemp("", "backlog-sync-inbox-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpParent)
+	tmpWorktree := filepath.Join(tmpParent, "worktree")
+	if err := os.MkdirAll(tmpWorktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	base := sampleTask()
+	base.ParentTaskID = nil
+	bl := newFakeBacklog(root, base)
+	gh := basicGH(map[string][]Issue{"owner/repo": {}})
+	git := &recordingGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}, {Path: tmpWorktree, Branch: "(detached)"}}, remoteRepo: "owner/repo"}
+	cfg := testConfig(root)
+	cfg.Inbox.Mode = InboxModePR
+	app := App{Git: git, Backlog: bl, GitHub: gh, Logf: func(string, ...any) {}}
+	if _, err := app.Run(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(git.removedWorktrees) != 1 || git.removedWorktrees[0] != tmpWorktree || git.prunes != 1 {
+		t.Fatalf("PR mode should remove leftover temp worktrees before collection and prune once, removed=%v prunes=%d", git.removedWorktrees, git.prunes)
+	}
+	if len(bl.createDirs) != 0 || len(gh.createdPullRequests) != 0 {
+		t.Fatalf("cleanup-only run should not import without inbox issues, creates=%v prs=%v", bl.createDirs, gh.createdPullRequests)
+	}
+}
+
 func TestCollectTasksSkipsAmbiguousNonRootBacklogDir(t *testing.T) {
 	root := t.TempDir()
 	other := t.TempDir()

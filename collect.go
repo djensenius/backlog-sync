@@ -173,8 +173,8 @@ func shouldSkipWorktree(wt Worktree) bool {
 }
 
 func isTempInboxWorktreePath(path string) bool {
-	tmp := filepath.Clean(os.TempDir())
-	clean := filepath.Clean(path)
+	tmp := resolvedPathForCompare(os.TempDir())
+	clean := resolvedPathForCompare(path)
 	rel, err := filepath.Rel(tmp, clean)
 	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || rel == ".." {
 		return false
@@ -182,6 +182,15 @@ func isTempInboxWorktreePath(path string) bool {
 	first := strings.Split(rel, string(os.PathSeparator))[0]
 	matched, err := filepath.Match("backlog-sync-inbox-*", first)
 	return err == nil && matched
+}
+
+func resolvedPathForCompare(path string) string {
+	clean := filepath.Clean(path)
+	resolved, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		return clean
+	}
+	return filepath.Clean(resolved)
 }
 
 func DiscoverBacklogDir(root string) (string, bool, error) {

@@ -32,6 +32,11 @@ func (a *App) Run(ctx context.Context, cfg Config) (Counters, error) {
 		return Counters{}, fmt.Errorf("read task prefix through backlog config: empty prefix")
 	}
 	cfg.TaskPrefix = strings.ToLower(strings.TrimSpace(prefix))
+	if cfg.Inbox.Enabled && !cfg.NoInbox && cfg.Inbox.Mode == InboxModePR && !cfg.DryRun {
+		if err := a.removeTemporaryInboxWorktrees(ctx, cfg); err != nil {
+			return Counters{}, err
+		}
+	}
 	resolved, err := CollectTasks(ctx, cfg, a.Git, a.Backlog, a.Logf)
 	if err != nil {
 		return Counters{}, err
@@ -443,6 +448,23 @@ func DiffIssue(task Task, issue Issue, body string, labels []string) (IssuePatch
 	return patch, fields
 }
 
+func (a *App) removeTemporaryInboxWorktrees(ctx context.Context, cfg Config) error {
+	worktrees, err := a.Git.Worktrees(ctx, cfg.Root)
+	if err != nil {
+		return err
+	}
+	for _, wt := range worktrees {
+		if wt.Path == "" || !isTempInboxWorktreePath(wt.Path) {
+			continue
+		}
+		a.Logf("remove leftover inbox temporary worktree %s", wt.Path)
+		if err := a.Git.RemoveWorktree(ctx, cfg.Root, wt.Path); err != nil {
+			return err
+		}
+	}
+	return a.Git.PruneWorktrees(ctx, cfg.Root)
+}
+
 func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, markerIssues map[string]Issue, issueByTaskID map[string]Issue, claimedIssues map[string]string, resolved ResolvedTasks) (imported int, linked map[string]Issue, err error) {
 	clean, reason := true, ""
 	if cfg.Inbox.Mode == InboxModePush {
@@ -571,9 +593,6 @@ func (a *App) ensureInboxPullRequest(ctx context.Context, cfg Config, issue Issu
 	branch := inboxBranchName(issue)
 	marker := inboxPRMarker(issue)
 	if !cfg.DryRun {
-		if err := a.Git.PruneWorktrees(ctx, cfg.Root); err != nil {
-			return false, err
-		}
 		if err := a.Git.DeleteLocalBranch(ctx, cfg.Root, branch); err != nil {
 			return false, err
 		}
