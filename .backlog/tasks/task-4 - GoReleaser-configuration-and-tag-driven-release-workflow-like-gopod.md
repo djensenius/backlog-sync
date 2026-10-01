@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@david'
 created_date: '2026-10-01 15:18'
-updated_date: '2026-10-01 17:45'
+updated_date: '2026-10-01 17:48'
 labels:
   - ci
   - release
@@ -98,10 +98,12 @@ Final validation after the cleanup commit:
 - `go test ./...`: `ok  	github.com/djensenius/backlog-sync	0.192s`.
 - `go vet ./...`: passed with no output.
 - `actionlint .github/workflows/release.yml`: passed with only the mise go directive deprecation warning.
+
+Final PR #3 clarity cleanup: README install docs now say tagged versions create draft GitHub releases, release archives are downloadable after draft publication, and Linux users can verify checksums with sha256sum -c. The consumer-specific launchd plist was replaced with the generic launchd/backlog-sync.plist.template in the release archive docs. Validation passed: mise run release:check; mise run ci; go test ./...; go vet ./...; actionlint .github/workflows/release.yml.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Added GoReleaser v2 configuration, local release check/snapshot mise tasks, and a pinned draft-release workflow that validates semver tags and ensures tagged commits are on main. Verified release config, all four snapshot archives/checksums/assets, injected snapshot version output, CI, go test, go vet, actionlint, and independent review.
+Added GoReleaser v2 config, local release check/snapshot tasks, and a pinned draft-release workflow. Replaced the consumer launchd plist with the generic launchd/backlog-sync.plist.template and updated README install docs for published draft releases, checksum verification, extraction, --version, and dry-run. Verified with release checks, CI, go test, go vet, actionlint, snapshot archives/checksums/assets, and injected snapshot version output.
 <!-- SECTION:FINAL_SUMMARY:END -->
