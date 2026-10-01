@@ -4,11 +4,13 @@ title: Generic README and configuration reference
 status: To Do
 assignee: []
 created_date: '2026-10-01 15:18'
+updated_date: '2026-10-01 16:03'
 labels:
   - docs
 milestone: m-0
 dependencies:
   - TASK-4
+  - TASK-10
 ordinal: 6000
 ---
 

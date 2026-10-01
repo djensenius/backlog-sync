@@ -1136,6 +1136,29 @@ func TestDuplicateMarkersAbortOnCLIFailureAndPaginationMissingTotal(t *testing.T
 	}
 }
 
+func TestVersionOutputAndFlagBypassConfig(t *testing.T) {
+	oldVersion, oldCommit, oldDate := version, commit, date
+	t.Cleanup(func() {
+		version, commit, date = oldVersion, oldCommit, oldDate
+	})
+
+	if got, want := versionOutput(), "backlog-sync version=dev commit=none date=unknown\n"; got != want {
+		t.Fatalf("default version output=%q, want %q", got, want)
+	}
+
+	version = "v1.2.3"
+	commit = "abc1234"
+	date = "2026-10-01T15:18:00Z"
+	if got, want := versionOutput(), "backlog-sync version=v1.2.3 commit=abc1234 date=2026-10-01T15:18:00Z\n"; got != want {
+		t.Fatalf("injected version output=%q, want %q", got, want)
+	}
+
+	t.Chdir(t.TempDir())
+	if _, err := parseFlags([]string{"--version"}); !errors.Is(err, errVersion) {
+		t.Fatalf("--version should return errVersion before config or git setup, got %v", err)
+	}
+}
+
 func TestSingleSelectClearVerboseDedupHelpAndDeferredPush(t *testing.T) {
 	ctx := context.Background()
 	root := tempRoot(t)
