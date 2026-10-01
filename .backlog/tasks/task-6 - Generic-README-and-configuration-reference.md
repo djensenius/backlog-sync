@@ -45,5 +45,6 @@ Implemented standalone generic README/config reference and added README link/sta
 - `go vet ./...`: passed with no output.
 - `mise run ci`: passed; test package ok and finished in 812.2ms (mise emitted go-directive deprecation warning).
 - `mise run release:check`: GoReleaser config validated (mise emitted go-directive deprecation warning).
-- `go test ./... -run 'TestReadme(LinksToSampleConfigs|LocalMarkdownLinksResolve|HasNoConsumerSpecificPaths)'`: ok 0.099s.\n- Stale path grep across README/examples/docs/launchd/install script: no `/Users/`, `canadian-ham`, or `ArkhamHorror` matches.
+- `go test ./... -run 'TestReadme(LinksToSampleConfigs|LocalMarkdownLinksResolve|HasNoConsumerSpecificPaths)'`: ok 0.099s.
+- Stale path grep across README/examples/docs/launchd/install script: no `/Users/`, `canadian-ham`, or `ArkhamHorror` matches.
 <!-- SECTION:NOTES:END -->
