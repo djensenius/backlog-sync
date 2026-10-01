@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@david'
 created_date: '2026-10-01 15:18'
-updated_date: '2026-10-01 18:28'
+updated_date: '2026-10-01 18:31'
 labels:
   - release
 milestone: m-0
@@ -43,4 +43,6 @@ The owner installs Backlog.md with Homebrew and wants backlog-sync distributed t
 
 <!-- SECTION:NOTES:BEGIN -->
 Token-independent prep implemented on branch task-5-homebrew-tap-pr. Added docs/homebrew-tap.md documenting required fine-grained secret HOMEBREW_TAP_FINE_GRAINED_TOKEN for djensenius/backlog-sync with access limited to djensenius/homebrew-tap contents read/write and pull requests read/write. Added scripts/homebrew-tap-update.go to deterministically generate Formula/backlog-sync.rb and a managed tap README block from GoReleaser release assets and checksums, plus go tests covering generation/idempotence/missing checksum failure. Wired .github/workflows/release.yml to generate a tap preview after GoReleaser, skip tap checkout/push/PR with a clear notice when the secret is absent, and only checkout djensenius/homebrew-tap/open a PR when the secret exists. Local evidence: gh issue list --repo djensenius/backlog-sync --label inbox --state open --limit 100 returned no output; go test ./... passed; go vet ./... passed; actionlint passed (mise emitted only the existing go directive deprecation warning); mise run ci passed; mise run release:check passed; mise run release:snapshot passed; generator rehearsal against dist/checksums.txt passed; ruby -c on generated Formula/backlog-sync.rb returned Syntax OK; brew style on generated Formula/backlog-sync.rb reported 1 file inspected, no offenses detected. Remaining blocked acceptance: actual tap PR creation still requires owner to store HOMEBREW_TAP_FINE_GRAINED_TOKEN, and brew install djensenius/tap/backlog-sync cannot be proven until the first stable release exists and the tap PR merges. No token or secret value was used or committed.
+
+Review blocker fixed in commit 87d4810: .github/workflows/release.yml now keeps tag pushes limited to draft-release creation plus a local stable-tag preview, and moves Homebrew tap PR creation to the release.published job for stable vMAJOR.MINOR.PATCH tags. The published-release job downloads checksums.txt from the public djensenius/backlog-sync release URL, generates a preview, clearly skips tap writes when HOMEBREW_TAP_FINE_GRAINED_TOKEN is absent, and only with that token checks out djensenius/homebrew-tap, prepares/updates the managed backlog-sync-<tag> branch, pushes it, and creates or reports the existing PR. docs/homebrew-tap.md now documents the draft-release vs published-release flow and rerun behavior. Local evidence for this follow-up: actionlint passed; go test ./... passed; go vet ./... passed; mise run ci passed; mise run release:check passed; mise run release:snapshot passed; generator rehearsal from dist/checksums.txt to /tmp/backlog-sync-homebrew-tap passed; ruby -c /tmp/backlog-sync-homebrew-tap/Formula/backlog-sync.rb returned Syntax OK. No secrets were used locally.
 <!-- SECTION:NOTES:END -->
