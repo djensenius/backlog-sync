@@ -1,10 +1,11 @@
 ---
 id: TASK-6
 title: Generic README and configuration reference
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@david'
 created_date: '2026-10-01 15:18'
-updated_date: '2026-10-01 16:03'
+updated_date: '2026-10-01 22:04'
 labels:
   - docs
 milestone: m-0
@@ -26,3 +27,12 @@ The README was written while the tool lived inside canadian-ham and still uses t
 - [ ] #2 No consumer-specific absolute paths remain except in clearly labelled examples
 - [ ] #3 Markdown links resolve
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Rewrite the README into a standalone guide covering installation paths, GitHub prerequisites, project/status setup, full config reference, examples, inbox modes, dry runs, launchd per config, and cross-branch/worktree behavior.
+2. Replace or clearly label any consumer-specific paths/examples so no unlabeled absolute consumer paths remain.
+3. Add or run a local Markdown link check for README/docs/example links, and keep config docs aligned with current schema and sample files.
+4. Validate with go test ./..., go vet ./..., mise run ci, release:check, and link checks before finalizing.
+<!-- SECTION:PLAN:END -->
