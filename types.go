@@ -199,6 +199,7 @@ type Counters struct {
 	ProjectAdded  int
 	FieldChanges  int
 	SubIssueLinks int
+	Failed        int
 }
 
 func (cfg Config) Normalized() Config {

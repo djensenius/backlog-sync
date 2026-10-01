@@ -86,6 +86,51 @@ Finished.
 	}
 }
 
+func TestRenderIssueBodyTruncationBoundaries(t *testing.T) {
+	notes := strings.Repeat("notes line with é and 🙂\n", 20)
+	doc := issueBodyDocument{
+		TaskID:              "task-16",
+		Header:              MarkerFor("TASK-16") + "\nmetadata survives\n\n",
+		Description:         "description",
+		AcceptanceCriteria:  "## Acceptance criteria\nNone\n",
+		ImplementationPlan:  sp("plan text"),
+		ImplementationNotes: &notes,
+		FinalSummary:        sp("summary text"),
+	}
+	exactBudget := countCharacters(doc.String())
+	if got := renderIssueBodyWithinBudget(doc, exactBudget); got != doc.String() || strings.Contains(got, "truncated") {
+		t.Fatalf("exact budget should not truncate\ngot=%s", got)
+	}
+	justOverBudget := exactBudget - 1
+	got := renderIssueBodyWithinBudget(doc, justOverBudget)
+	if countCharacters(got) > justOverBudget {
+		t.Fatalf("just-over render is %d characters, budget %d", countCharacters(got), justOverBudget)
+	}
+	if !strings.Contains(got, "… truncated (") || !strings.Contains(got, "see `backlog task view task-16 --plain`") {
+		t.Fatalf("truncation marker missing from just-over render\n%s", got)
+	}
+	if !strings.HasPrefix(got, MarkerFor("TASK-16")+"\nmetadata survives") {
+		t.Fatalf("marker/metadata prefix changed\n%s", got)
+	}
+
+	farOver := sampleTask()
+	farOver.ParentTaskID = nil
+	farOver.Description = strings.Repeat("description line with é\n", 600)
+	farOver.ImplementationPlan = strings.Repeat("plan line\n", 600)
+	farOver.ImplementationNotes = strings.Repeat("notes line with 🙂\n", 5000)
+	farOver.FinalSummary = sp(strings.Repeat("summary line\n", 600))
+	got = RenderIssueBodyWithOptions(farOver, RenderOptions{})
+	if chars := countCharacters(got); chars > issueBodyCharacterBudget || chars > githubIssueBodyCharacterLimit {
+		t.Fatalf("far-over render is %d characters, budget %d hard limit %d", chars, issueBodyCharacterBudget, githubIssueBodyCharacterLimit)
+	}
+	if !strings.Contains(got, "## Implementation notes") || !strings.Contains(got, "… truncated (") || !strings.Contains(got, "🙂") {
+		t.Fatalf("far-over multi-byte notes were not visibly truncated\n%s", got)
+	}
+	if !strings.Contains(got, "## Implementation plan\nplan line") || !strings.Contains(got, "## Final summary\nsummary line") {
+		t.Fatalf("sections later in the shrink order were truncated before notes required it\n%s", got)
+	}
+}
+
 func TestParseMarkerStrictFirstLineAndDotted(t *testing.T) {
 	cases := []struct {
 		name, body, want string
@@ -157,6 +202,41 @@ func TestAppMultiRepoAdoptionProjectMoveAndTwoRunNoop(t *testing.T) {
 	}
 	if c.Created != 0 || len(gh.createdIssues) != 0 {
 		t.Fatalf("project move should not create duplicate, counters=%+v created=%d", c, len(gh.createdIssues))
+	}
+}
+
+func TestAppCreateFailureIsolatedToOneTask(t *testing.T) {
+	ctx := context.Background()
+	root := tempRoot(t)
+	first := sampleTask()
+	first.ID = "TASK-40"
+	first.Title = "First succeeds"
+	first.ParentTaskID = nil
+	second := sampleTask()
+	second.ID = "TASK-41"
+	second.Title = "Create fails"
+	second.ParentTaskID = nil
+	third := sampleTask()
+	third.ID = "TASK-42"
+	third.Title = "Third succeeds"
+	third.ParentTaskID = nil
+	bl := newFakeBacklog(root, first, second, third)
+	gh := basicGH(map[string][]Issue{"owner/repo": {}})
+	gh.createErrTitleContains = "task-41:"
+	var logs []string
+	app := App{Git: fakeGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}}, rootClean: true}, Backlog: bl, GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	c, err := app.Run(ctx, testConfig(root))
+	if err == nil || !strings.Contains(err.Error(), "1 task sync operation") {
+		t.Fatalf("expected non-zero run error for one failed task, counters=%+v err=%v logs=%v", c, err, logs)
+	}
+	if c.Failed != 1 || c.Created != 2 || len(gh.createdIssues) != 2 {
+		t.Fatalf("create failure should not block other tasks, counters=%+v created=%d logs=%v", c, len(gh.createdIssues), logs)
+	}
+	if !logContains(logs, "error: task-41 create issue failed") || !logContains(logs, "sync complete:") || !logContains(logs, "1 failed") {
+		t.Fatalf("failure and summary logs should include task id and failed count, logs=%v", logs)
+	}
+	if findIssueByTitlePrefix(gh.issues["owner/repo"], "task-40:").Number == 0 || findIssueByTitlePrefix(gh.issues["owner/repo"], "task-42:").Number == 0 {
+		t.Fatalf("successful tasks were not created, issues=%+v", gh.issues["owner/repo"])
 	}
 }
 
@@ -238,9 +318,9 @@ func TestProjectFieldsMilestoneParserAndSubIssueWarnOnce(t *testing.T) {
 	gh.project.Fields["Branch"] = ProjectField{ID: "BF"}
 	gh.subIssueErr = errors.New("unsupported")
 	app := App{Git: fakeGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}}, rootClean: true}, Backlog: bl, GitHub: gh, Logf: func(string, ...any) {}}
-	_, err := app.Run(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
+	c, err := app.Run(ctx, cfg)
+	if err == nil || c.Failed != 1 || !strings.Contains(err.Error(), "1 task sync operation") {
+		t.Fatalf("expected one counted sub-issue failure, counters=%+v err=%v", c, err)
 	}
 	if gh.fieldUpdates == 0 {
 		t.Fatalf("expected project field updates")
@@ -482,18 +562,21 @@ func TestSubIssueParentDiffForeignParentAndWarnOnce(t *testing.T) {
 	gh := basicGH(map[string][]Issue{"owner/repo": {parent, child}})
 	gh.parents["C"] = IssueParentInfo{ID: "P", Number: 1, Repo: "owner/repo"}
 	app := App{GitHub: gh, Logf: func(string, ...any) {}}
-	if links := app.syncSubIssues(ctx, cfg, resolved, issues); links != 0 || gh.addSubIssueCalls != 0 || gh.removeSubIssueCalls != 0 {
-		t.Fatalf("same parent should be no-op links=%d add=%d remove=%d", links, gh.addSubIssueCalls, gh.removeSubIssueCalls)
+	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues)
+	if links != 0 || failed != 0 || gh.addSubIssueCalls != 0 || gh.removeSubIssueCalls != 0 {
+		t.Fatalf("same parent should be no-op links=%d failed=%d add=%d remove=%d", links, failed, gh.addSubIssueCalls, gh.removeSubIssueCalls)
 	}
 	gh.parents["C"] = IssueParentInfo{ID: "OLD", Number: 9, Repo: "owner/repo"}
-	if links := app.syncSubIssues(ctx, cfg, resolved, issues); links != 1 || gh.removeSubIssueCalls != 1 || gh.addSubIssueCalls != 1 {
-		t.Fatalf("different parent should remove then add links=%d add=%d remove=%d", links, gh.addSubIssueCalls, gh.removeSubIssueCalls)
+	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues)
+	if links != 1 || failed != 0 || gh.removeSubIssueCalls != 1 || gh.addSubIssueCalls != 1 {
+		t.Fatalf("different parent should remove then add links=%d failed=%d add=%d remove=%d", links, failed, gh.addSubIssueCalls, gh.removeSubIssueCalls)
 	}
 	gh = basicGH(map[string][]Issue{"owner/repo": {parent, child}})
 	gh.parents["C"] = IssueParentInfo{ID: "FOREIGN", Number: 99, Repo: "evil/repo"}
 	app = App{GitHub: gh, Logf: func(string, ...any) {}}
-	if links := app.syncSubIssues(ctx, cfg, resolved, issues); links != 0 || gh.writeCalls() != 0 {
-		t.Fatalf("foreign parent should skip all writes links=%d writes=%d", links, gh.writeCalls())
+	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues)
+	if links != 0 || failed != 0 || gh.writeCalls() != 0 {
+		t.Fatalf("foreign parent should skip all writes links=%d failed=%d writes=%d", links, failed, gh.writeCalls())
 	}
 
 	child2 := Issue{Number: 3, DatabaseID: 3, NodeID: "C2", Repo: "owner/repo"}
@@ -503,9 +586,9 @@ func TestSubIssueParentDiffForeignParentAndWarnOnce(t *testing.T) {
 	gh.subIssueErr = errors.New("unsupported")
 	var logs []string
 	app = App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
-	_ = app.syncSubIssues(ctx, cfg, resolved, issues)
-	if strings.Count(strings.Join(logs, "\n"), "sub-issue link failed") != 1 || gh.addSubIssueCalls != 2 {
-		t.Fatalf("expected warn-once with two children, calls=%d logs=%v", gh.addSubIssueCalls, logs)
+	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues)
+	if links != 0 || failed != 2 || strings.Count(strings.Join(logs, "\n"), "add sub-issue") != 2 || !logContains(logs, "task-1.1") || !logContains(logs, "task-1.2") || gh.addSubIssueCalls != 2 {
+		t.Fatalf("expected per-task sub-issue failures, links=%d failed=%d calls=%d logs=%v", links, failed, gh.addSubIssueCalls, logs)
 	}
 }
 
@@ -835,6 +918,7 @@ type fakeGitHub struct {
 	subIssueErr              error
 	removeSubIssueErr        error
 	updateErr                error
+	createErrTitleContains   string
 	failOnWrite              bool
 }
 
@@ -858,6 +942,9 @@ func (g *fakeGitHub) ListIssues(_ context.Context, repo string) ([]Issue, error)
 func (g *fakeGitHub) CreateIssue(_ context.Context, repo string, title string, body string, labels []string) (Issue, error) {
 	if g.failOnWrite {
 		return Issue{}, errors.New("unexpected write")
+	}
+	if g.createErrTitleContains != "" && strings.Contains(title, g.createErrTitleContains) {
+		return Issue{}, errors.New("create failed")
 	}
 	issue := Issue{Number: 100 + len(g.createdIssues), DatabaseID: int64(100 + len(g.createdIssues)), NodeID: "I_NEW_" + title, HTMLURL: "https://github.com/" + repo + "/issues/100", Title: title, Body: body, State: "open", Repo: repo, Labels: labelsToIssueLabels(labels)}
 	g.createdIssues = append(g.createdIssues, issue)

@@ -7,11 +7,29 @@ import (
 	"strings"
 )
 
+const (
+	githubIssueBodyCharacterLimit = 65536
+	// GitHub documents its issue body limit in characters. Count Go runes (Unicode
+	// scalar values) rather than bytes so multi-byte UTF-8 text receives the same
+	// budget as single-byte text, and leave margin below GitHub's hard limit.
+	issueBodyCharacterBudget = 60000
+)
+
 type RenderOptions struct {
 	IssueByTaskID map[string]Issue
 	TaskByID      map[string]Task
 	Milestones    map[string]string
 	MainBranch    string
+}
+
+type issueBodyDocument struct {
+	TaskID              string
+	Header              string
+	Description         string
+	AcceptanceCriteria  string
+	ImplementationPlan  *string
+	ImplementationNotes *string
+	FinalSummary        *string
 }
 
 func RenderIssueBody(task Task, issueByTaskID map[string]Issue, taskByID map[string]Task) string {
@@ -28,47 +46,151 @@ func RenderIssueBodyWithOptions(task Task, opts RenderOptions) string {
 	if opts.MainBranch == "" {
 		opts.MainBranch = "main"
 	}
-	var b bytes.Buffer
-	fmt.Fprintf(&b, "%s\n", MarkerFor(task.ID))
-	fmt.Fprintf(&b, "%s\n\n", mirrorNotice)
-	fmt.Fprintf(&b, "Status: %s\n", task.Status)
+	doc := buildIssueBodyDocument(task, opts)
+	return renderIssueBodyWithinBudget(doc, issueBodyCharacterBudget)
+}
+
+func buildIssueBodyDocument(task Task, opts RenderOptions) issueBodyDocument {
+	var header bytes.Buffer
+	fmt.Fprintf(&header, "%s\n", MarkerFor(task.ID))
+	fmt.Fprintf(&header, "%s\n\n", mirrorNotice)
+	fmt.Fprintf(&header, "Status: %s\n", task.Status)
 	if task.Branch != "" && task.Branch != opts.MainBranch {
-		fmt.Fprintf(&b, "Branch: %s\n", task.Branch)
+		fmt.Fprintf(&header, "Branch: %s\n", task.Branch)
 	}
-	fmt.Fprintf(&b, "Project: %s\n", stringPtrOrNone(task.Project))
-	fmt.Fprintf(&b, "Milestone: %s\n", milestoneTitle(task.Milestone, opts.Milestones))
-	fmt.Fprintf(&b, "Priority: %s\n", stringPtrOrNone(task.Priority))
-	fmt.Fprintf(&b, "Labels: %s\n", commaOrNone(task.Labels))
-	fmt.Fprintf(&b, "Assignees: %s\n", commaOrNone(task.Assignees))
-	fmt.Fprintf(&b, "Parent: %s\n", renderParent(task, opts.IssueByTaskID, opts.TaskByID))
-	fmt.Fprintf(&b, "Depends on:\n%s\n", renderDependencyList(task.Dependencies, opts.IssueByTaskID, opts.TaskByID))
-	fmt.Fprintf(&b, "Subtasks:\n%s\n\n", renderTaskRefList(task.Subtasks, opts.IssueByTaskID))
-	fmt.Fprintf(&b, "## Description\n%s\n\n", blockOrNone(task.Description))
-	fmt.Fprintf(&b, "## Acceptance criteria\n")
+	fmt.Fprintf(&header, "Project: %s\n", stringPtrOrNone(task.Project))
+	fmt.Fprintf(&header, "Milestone: %s\n", milestoneTitle(task.Milestone, opts.Milestones))
+	fmt.Fprintf(&header, "Priority: %s\n", stringPtrOrNone(task.Priority))
+	fmt.Fprintf(&header, "Labels: %s\n", commaOrNone(task.Labels))
+	fmt.Fprintf(&header, "Assignees: %s\n", commaOrNone(task.Assignees))
+	fmt.Fprintf(&header, "Parent: %s\n", renderParent(task, opts.IssueByTaskID, opts.TaskByID))
+	fmt.Fprintf(&header, "Depends on:\n%s\n", renderDependencyList(task.Dependencies, opts.IssueByTaskID, opts.TaskByID))
+	fmt.Fprintf(&header, "Subtasks:\n%s\n\n", renderTaskRefList(task.Subtasks, opts.IssueByTaskID))
+
+	var criteria bytes.Buffer
+	fmt.Fprintf(&criteria, "## Acceptance criteria\n")
 	if len(task.AcceptanceCriteria) == 0 {
-		fmt.Fprintf(&b, "None\n")
+		fmt.Fprintf(&criteria, "None\n")
 	} else {
-		criteria := append([]AcceptanceCriterion(nil), task.AcceptanceCriteria...)
-		sort.Slice(criteria, func(i, j int) bool { return criteria[i].Index < criteria[j].Index })
-		for _, ac := range criteria {
+		items := append([]AcceptanceCriterion(nil), task.AcceptanceCriteria...)
+		sort.Slice(items, func(i, j int) bool { return items[i].Index < items[j].Index })
+		for _, ac := range items {
 			box := " "
 			if ac.Checked {
 				box = "x"
 			}
-			fmt.Fprintf(&b, "- [%s] %s\n", box, ac.Text)
+			fmt.Fprintf(&criteria, "- [%s] %s\n", box, ac.Text)
 		}
 	}
-	if strings.TrimSpace(task.ImplementationPlan) != "" {
-		fmt.Fprintf(&b, "\n## Implementation plan\n%s\n", strings.TrimSpace(task.ImplementationPlan))
+
+	doc := issueBodyDocument{
+		TaskID:             CanonicalTaskID(task.ID),
+		Header:             header.String(),
+		Description:        blockOrNone(task.Description),
+		AcceptanceCriteria: criteria.String(),
 	}
-	if strings.TrimSpace(task.ImplementationNotes) != "" {
-		fmt.Fprintf(&b, "\n## Implementation notes\n%s\n", strings.TrimSpace(task.ImplementationNotes))
+	if plan := strings.TrimSpace(task.ImplementationPlan); plan != "" {
+		doc.ImplementationPlan = &plan
 	}
-	if task.FinalSummary != nil && strings.TrimSpace(*task.FinalSummary) != "" {
-		fmt.Fprintf(&b, "\n## Final summary\n%s\n", strings.TrimSpace(*task.FinalSummary))
+	if notes := strings.TrimSpace(task.ImplementationNotes); notes != "" {
+		doc.ImplementationNotes = &notes
+	}
+	if task.FinalSummary != nil {
+		if summary := strings.TrimSpace(*task.FinalSummary); summary != "" {
+			doc.FinalSummary = &summary
+		}
+	}
+	return doc
+}
+
+func renderIssueBodyWithinBudget(doc issueBodyDocument, budget int) string {
+	if budget <= 0 {
+		return doc.String()
+	}
+	if countCharacters(doc.String()) <= budget {
+		return doc.String()
+	}
+	sections := []*string{doc.ImplementationNotes, doc.ImplementationPlan, &doc.Description, doc.FinalSummary}
+	for _, section := range sections {
+		if section == nil || *section == "" {
+			continue
+		}
+		if countCharacters(doc.String()) <= budget {
+			break
+		}
+		truncateIssueSectionToFit(&doc, section, budget)
+	}
+	return doc.String()
+}
+
+func (d issueBodyDocument) String() string {
+	var b bytes.Buffer
+	b.WriteString(d.Header)
+	fmt.Fprintf(&b, "## Description\n%s\n\n", d.Description)
+	b.WriteString(d.AcceptanceCriteria)
+	if d.ImplementationPlan != nil && strings.TrimSpace(*d.ImplementationPlan) != "" {
+		fmt.Fprintf(&b, "\n## Implementation plan\n%s\n", strings.TrimSpace(*d.ImplementationPlan))
+	}
+	if d.ImplementationNotes != nil && strings.TrimSpace(*d.ImplementationNotes) != "" {
+		fmt.Fprintf(&b, "\n## Implementation notes\n%s\n", strings.TrimSpace(*d.ImplementationNotes))
+	}
+	if d.FinalSummary != nil && strings.TrimSpace(*d.FinalSummary) != "" {
+		fmt.Fprintf(&b, "\n## Final summary\n%s\n", strings.TrimSpace(*d.FinalSummary))
 	}
 	return strings.TrimRight(b.String(), "\n") + "\n"
 }
+
+func truncateIssueSectionToFit(doc *issueBodyDocument, section *string, budget int) {
+	original := *section
+	originalRunes := []rune(original)
+	if len(originalRunes) == 0 {
+		return
+	}
+	best := -1
+	low, high := 0, len(originalRunes)
+	for low <= high {
+		mid := low + (high-low)/2
+		candidate := truncatedIssueSectionContent(original, mid, doc.TaskID)
+		*section = candidate
+		if countCharacters(doc.String()) <= budget {
+			best = mid
+			low = mid + 1
+		} else {
+			high = mid - 1
+		}
+	}
+	if best < 0 {
+		*section = original
+		return
+	}
+	retained := best
+	for i := best; i > 0; i-- {
+		if originalRunes[i-1] == '\n' {
+			retained = i - 1
+			break
+		}
+	}
+	*section = truncatedIssueSectionContent(original, retained, doc.TaskID)
+}
+
+func truncatedIssueSectionContent(original string, retained int, taskID string) string {
+	runes := []rune(original)
+	if retained > len(runes) {
+		retained = len(runes)
+	}
+	if retained < 0 {
+		retained = 0
+	}
+	prefix := strings.TrimRight(string(runes[:retained]), "\n")
+	omitted := len(runes) - countCharacters(prefix)
+	marker := fmt.Sprintf("… truncated (%d characters omitted); see `backlog task view %s --plain`", omitted, CanonicalTaskID(taskID))
+	if strings.TrimSpace(prefix) == "" {
+		return marker
+	}
+	return prefix + "\n" + marker
+}
+
+func countCharacters(value string) int { return len([]rune(value)) }
 
 func renderParent(task Task, issueByTaskID map[string]Issue, taskByID map[string]Task) string {
 	if task.ParentTaskID == nil || strings.TrimSpace(*task.ParentTaskID) == "" {
