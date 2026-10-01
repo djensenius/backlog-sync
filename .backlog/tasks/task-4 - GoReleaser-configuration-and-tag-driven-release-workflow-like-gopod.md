@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@david'
 created_date: '2026-10-01 15:18'
-updated_date: '2026-10-01 17:38'
+updated_date: '2026-10-01 17:42'
 labels:
   - ci
   - release
@@ -37,6 +37,8 @@ Users and other machines should install a tagged, checksummed binary instead of 
 2. Extend mise.toml with release:check and release:snapshot tasks that validate the GoReleaser config and produce a local snapshot build.
 3. Add a pinned release workflow that runs only for tag pushes, validates the tag as semver, verifies the tagged commit is contained in origin/main, and publishes a draft GoReleaser release.
 4. Verify locally with mise run release:check, mise run release:snapshot, snapshot binary --version output, mise run ci/go test/go vet, and actionlint.
+
+PR #3 follow-up: replace the archived consumer launchd plist with a reusable launchd plist template, update README release install/verification text, then rerun release and CI validation.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
