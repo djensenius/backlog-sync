@@ -1,7 +1,7 @@
 ---
 id: TASK-10
 title: Add distributable sample configuration files
-status: In Progress
+status: Done
 assignee:
   - '@david'
 created_date: '2026-10-01 16:03'
