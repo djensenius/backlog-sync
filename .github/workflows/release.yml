@@ -4,14 +4,19 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  release:
+    types: [published]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  draft-release:
+    if: ${{ github.event_name == 'push' }}
     name: Draft release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -43,3 +48,153 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
         run: goreleaser release --clean
+      - name: Check Homebrew tap preview eligibility
+        id: homebrew-preview
+        shell: bash
+        run: |
+          set -euo pipefail
+          stable_regex='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if [[ "${GITHUB_REF_NAME}" =~ $stable_regex ]]; then
+            echo "stable=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "stable=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice title=Homebrew tap preview skipped::${GITHUB_REF_NAME} is not a stable vMAJOR.MINOR.PATCH tag."
+          fi
+      - name: Generate Homebrew tap preview
+        if: ${{ steps.homebrew-preview.outputs.stable == 'true' }}
+        run: >-
+          go run ./scripts/homebrew-tap-update.go
+          --version "${GITHUB_REF_NAME}"
+          --checksums dist/checksums.txt
+          --out-dir dist/homebrew-tap
+
+  homebrew-tap-pr:
+    if: ${{ github.event_name == 'release' }}
+    name: Homebrew tap PR
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Check published release eligibility
+        id: published-release
+        shell: bash
+        run: |
+          set -euo pipefail
+          stable_regex='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if [[ "${RELEASE_TAG}" =~ $stable_regex ]]; then
+            echo "stable=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "stable=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice title=Homebrew tap PR skipped::${RELEASE_TAG} is not a stable vMAJOR.MINOR.PATCH release tag."
+          fi
+      - name: Install mise tools
+        if: ${{ steps.published-release.outputs.stable == 'true' }}
+        uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db
+        with:
+          cache: false
+      - name: Download public release checksums
+        if: ${{ steps.published-release.outputs.stable == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/public-release
+          checksums_url="https://github.com/djensenius/backlog-sync/releases/download/${RELEASE_TAG}/checksums.txt"
+          curl --fail --location --silent --show-error --retry 3 \
+            --output dist/public-release/checksums.txt \
+            "$checksums_url"
+          echo "Downloaded checksums.txt from $checksums_url"
+      - name: Generate Homebrew tap preview
+        if: ${{ steps.published-release.outputs.stable == 'true' }}
+        run: >-
+          go run ./scripts/homebrew-tap-update.go
+          --version "${RELEASE_TAG}"
+          --checksums dist/public-release/checksums.txt
+          --out-dir dist/homebrew-tap
+      - name: Check Homebrew tap token
+        if: ${{ steps.published-release.outputs.stable == 'true' }}
+        id: homebrew-token
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_FINE_GRAINED_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${HOMEBREW_TAP_TOKEN}" ]; then
+            echo "available=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "available=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice title=Homebrew tap PR skipped::Repository secret HOMEBREW_TAP_FINE_GRAINED_TOKEN is not configured; downloaded public checksums and generated preview only."
+          fi
+      - name: Check out Homebrew tap
+        if: ${{ steps.published-release.outputs.stable == 'true' && steps.homebrew-token.outputs.available == 'true' }}
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: djensenius/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_FINE_GRAINED_TOKEN }}
+          path: homebrew-tap
+          fetch-depth: 0
+      - name: Prepare Homebrew tap branch
+        if: ${{ steps.published-release.outputs.stable == 'true' && steps.homebrew-token.outputs.available == 'true' }}
+        working-directory: homebrew-tap
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="backlog-sync-${RELEASE_TAG}"
+          git fetch --force --prune origin +refs/heads/main:refs/remotes/origin/main
+          if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
+            git fetch --force origin "+refs/heads/${branch}:refs/remotes/origin/${branch}"
+            echo "Updating existing Homebrew tap branch ${branch}."
+          else
+            echo "Creating Homebrew tap branch ${branch} from origin/main."
+          fi
+          git switch -C "${branch}" origin/main
+      - name: Apply Homebrew tap update
+        if: ${{ steps.published-release.outputs.stable == 'true' && steps.homebrew-token.outputs.available == 'true' }}
+        run: >-
+          go run ./scripts/homebrew-tap-update.go
+          --version "${RELEASE_TAG}"
+          --checksums dist/public-release/checksums.txt
+          --tap-dir homebrew-tap
+      - name: Validate generated Homebrew formula syntax
+        if: ${{ steps.published-release.outputs.stable == 'true' && steps.homebrew-token.outputs.available == 'true' }}
+        run: ruby -c homebrew-tap/Formula/backlog-sync.rb
+      - name: Open or update Homebrew tap pull request
+        if: ${{ steps.published-release.outputs.stable == 'true' && steps.homebrew-token.outputs.available == 'true' }}
+        working-directory: homebrew-tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_FINE_GRAINED_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="backlog-sync-${RELEASE_TAG}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          changed=false
+          if [ -n "$(git status --porcelain -- Formula/backlog-sync.rb README.md)" ]; then
+            changed=true
+            git add Formula/backlog-sync.rb README.md
+            git commit -m "Update backlog-sync to ${RELEASE_TAG}"
+            git push --force-with-lease origin "HEAD:${branch}"
+          fi
+
+          existing_pr_url="$(gh pr list \
+            --repo djensenius/homebrew-tap \
+            --head "${branch}" \
+            --base main \
+            --state open \
+            --json url \
+            --jq '.[0].url // ""')"
+          if [ -n "${existing_pr_url}" ]; then
+            echo "Homebrew tap PR already exists for ${RELEASE_TAG}: ${existing_pr_url}"
+          elif [ "${changed}" = true ]; then
+            gh pr create \
+              --repo djensenius/homebrew-tap \
+              --base main \
+              --head "${branch}" \
+              --title "Update backlog-sync to ${RELEASE_TAG}" \
+              --body "Updates Formula/backlog-sync.rb and the tap README for ${RELEASE_TAG}. Generated from the published djensenius/backlog-sync release assets and checksums."
+          else
+            echo "Homebrew tap already matches ${RELEASE_TAG}; no PR needed."
+          fi

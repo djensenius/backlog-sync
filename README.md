@@ -152,7 +152,7 @@ tar -xzf "$asset"
 ./backlog-sync --config /path/to/repo/.backlog-sync.json --dry-run
 ```
 
-Homebrew installation is planned. To build from source instead, use Go 1.27 or newer and the standard library only:
+Homebrew installation is planned as `brew install djensenius/tap/backlog-sync` after the first stable release is published and the tap PR merges. TASK-5 release preparation, including the required `HOMEBREW_TAP_FINE_GRAINED_TOKEN` repository secret and local formula rehearsal, is documented in [docs/homebrew-tap.md](docs/homebrew-tap.md). To build from source instead, use Go 1.27 or newer and the standard library only:
 
 ```bash
 go install github.com/djensenius/backlog-sync@latest   # or: git clone, then go build -o ~/bin/backlog-sync .
