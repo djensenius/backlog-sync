@@ -16,9 +16,19 @@ import (
 	"time"
 )
 
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
 	cfg, err := parseFlags(os.Args[1:])
 	if err != nil {
+		if errors.Is(err, errVersion) {
+			fmt.Print(versionOutput())
+			return
+		}
 		if errors.Is(err, flag.ErrHelp) {
 			os.Exit(0)
 		}
@@ -50,7 +60,7 @@ func parseFlags(args []string) (Config, error) {
 	fs.SetOutput(os.Stdout)
 	var rootFlag, configFlag, repoFlag, ownerFlag, ownerTypeFlag, mainBranchFlag string
 	var projectNumberFlag int
-	var dryRun, noInbox, verbose bool
+	var dryRun, noInbox, verbose, showVersion bool
 	fs.StringVar(&rootFlag, "root", "", "repository root (default: git toplevel of cwd)")
 	fs.StringVar(&configFlag, "config", "", "JSON config path (default: <root>/.backlog-sync.json)")
 	fs.StringVar(&repoFlag, "repo", "", "override default GitHub repository owner/name")
@@ -61,8 +71,12 @@ func parseFlags(args []string) (Config, error) {
 	fs.BoolVar(&dryRun, "dry-run", false, "print planned writes without changing GitHub, Backlog, or git")
 	fs.BoolVar(&noInbox, "no-inbox", false, "skip GitHub inbox import")
 	fs.BoolVar(&verbose, "verbose", false, "print additional diagnostic logs")
+	fs.BoolVar(&showVersion, "version", false, "print version information and exit")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
+	}
+	if showVersion {
+		return Config{}, errVersion
 	}
 	if fs.NArg() != 0 {
 		return Config{}, fmt.Errorf("unexpected arguments: %v", fs.Args())
@@ -200,6 +214,12 @@ func defaultLockFile(configPath string) string {
 		cache = os.TempDir()
 	}
 	return filepath.Join(cache, "backlog-sync-"+hex.EncodeToString(sum[:8])+".lock")
+}
+
+var errVersion = errors.New("version requested")
+
+func versionOutput() string {
+	return fmt.Sprintf("backlog-sync version=%s commit=%s date=%s\n", version, commit, date)
 }
 
 var errLocked = errors.New("locked")
