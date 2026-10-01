@@ -58,8 +58,8 @@ archives:
           group: root
           mode: 0755
           mtime: "{{ .CommitDate }}"
-      - src: launchd/*.plist
-        dst: launchd
+      - src: launchd/backlog-sync.plist.template
+        dst: launchd/backlog-sync.plist.template
         info:
           owner: root
           group: root
