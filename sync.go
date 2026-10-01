@@ -103,6 +103,12 @@ func (a *App) Run(ctx context.Context, cfg Config) (Counters, error) {
 			repo = issue.Repo
 		}
 		if !exists {
+			body := RenderIssueBodyWithOptions(task, RenderOptions{IssueByTaskID: issueByTaskID, TaskByID: resolved.ByID, Milestones: milestones, MainBranch: cfg.MainBranch})
+			if err := validateIssueBodyWithinGitHubLimit(id, body); err != nil {
+				recordTaskFailure(id, "render issue body", err)
+				failedCreate[id] = true
+				continue
+			}
 			labels := DesiredLabels(task, Issue{}, cfg)
 			labelFailed := false
 			for _, label := range labels {
@@ -116,7 +122,6 @@ func (a *App) Run(ctx context.Context, cfg Config) (Counters, error) {
 				failedCreate[id] = true
 				continue
 			}
-			body := RenderIssueBodyWithOptions(task, RenderOptions{IssueByTaskID: issueByTaskID, TaskByID: resolved.ByID, Milestones: milestones, MainBranch: cfg.MainBranch})
 			a.LogAction(cfg.DryRun, "create issue %s in %s", IssueTitle(task), repo)
 			if !cfg.DryRun {
 				created, err := a.GitHub.CreateIssue(ctx, repo, IssueTitle(task), body, labels)
@@ -168,6 +173,10 @@ func (a *App) Run(ctx context.Context, cfg Config) (Counters, error) {
 			continue
 		}
 		body := RenderIssueBodyWithOptions(task, RenderOptions{IssueByTaskID: issueByTaskID, TaskByID: resolved.ByID, Milestones: milestones, MainBranch: cfg.MainBranch})
+		if err := validateIssueBodyWithinGitHubLimit(id, body); err != nil {
+			recordTaskFailure(id, "render issue body", err)
+			continue
+		}
 		labels := DesiredLabels(task, issue, cfg)
 		patch, fields := DiffIssue(task, issue, body, labels)
 		if len(fields) > 0 {
@@ -236,7 +245,7 @@ func (a *App) Run(ctx context.Context, cfg Config) (Counters, error) {
 		counters.SubIssueLinks += linked
 		counters.Failed += failed
 	}
-	a.Logf("sync complete: %d created, %d updated, %d status changes, %d imported, %d failed", counters.Created, counters.Updated, counters.StatusChanges, counters.Imported, counters.Failed)
+	a.Logf("sync complete: %d created, %d updated, %d status changes, %d imported, %d failed operations", counters.Created, counters.Updated, counters.StatusChanges, counters.Imported, counters.Failed)
 	if counters.Failed > 0 {
 		return counters, fmt.Errorf("%d task sync operation(s) failed", counters.Failed)
 	}
@@ -762,6 +771,14 @@ func optionIDCaseInsensitive(options map[string]string, name string) string {
 	return ""
 }
 
+func validateIssueBodyWithinGitHubLimit(taskID, body string) error {
+	chars := countCharacters(body)
+	if chars <= githubIssueBodyCharacterLimit {
+		return nil
+	}
+	return fmt.Errorf("rendered issue body is %d characters after truncation; GitHub hard limit is %d", chars, githubIssueBodyCharacterLimit)
+}
+
 func (a *App) logDryRunFieldSets(cfg Config, project ProjectInfo, task Task, milestones map[string]string) int {
 	count := 0
 	for _, desired := range desiredProjectFieldValues(cfg, task, milestones) {
@@ -818,6 +835,10 @@ func (a *App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTa
 				}
 			}
 			if err := a.GitHub.AddSubIssue(ctx, parent.Repo, parent.Number, child.DatabaseID); err != nil {
+				if isExpectedSubIssueLinkRejection(err) {
+					a.warnOnce(warned, "add-sub-issue-"+strings.ToLower(err.Error()), "warning: sub-issue links are not supported for %s#%d under %s#%d; skipping link: %v", child.Repo, child.Number, parent.Repo, parent.Number, err)
+					continue
+				}
 				failed++
 				a.Logf("error: %s add sub-issue under %s#%d failed: %v", id, parent.Repo, parent.Number, err)
 				continue
@@ -826,6 +847,19 @@ func (a *App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTa
 		linked++
 	}
 	return linked, failed
+}
+
+func isExpectedSubIssueLinkRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, part := range []string{"unsupported", "not supported", "not support", "cross-repo", "cross repo", "different repositories", "same repository"} {
+		if strings.Contains(msg, part) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) ensureLabel(ctx context.Context, cfg Config, repo, label string) error {

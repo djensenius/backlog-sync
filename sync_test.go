@@ -131,6 +131,95 @@ func TestRenderIssueBodyTruncationBoundaries(t *testing.T) {
 	}
 }
 
+func TestRenderIssueBodyMultipleOversizedSectionsStayWithinBudget(t *testing.T) {
+	task := sampleTask()
+	task.ParentTaskID = nil
+	task.Dependencies = nil
+	task.Subtasks = nil
+	task.Description = strings.Repeat("description line\n", 3900)
+	task.ImplementationPlan = ""
+	task.ImplementationNotes = strings.Repeat("notes line\n", 6100)
+	task.FinalSummary = nil
+
+	body := RenderIssueBodyWithOptions(task, RenderOptions{})
+	if chars := countCharacters(body); chars > issueBodyCharacterBudget || chars > githubIssueBodyCharacterLimit {
+		t.Fatalf("render is %d characters, budget %d hard limit %d", chars, issueBodyCharacterBudget, githubIssueBodyCharacterLimit)
+	}
+	notes := markdownSection(t, body, "Implementation notes")
+	if strings.Contains(notes, "notes line") || !strings.Contains(notes, "… truncated (") {
+		t.Fatalf("oversized notes should be reduced to the truncation note before later sections shrink\n%s", notes)
+	}
+	description := markdownSection(t, body, "Description")
+	if !strings.Contains(description, "description line") || !strings.Contains(description, "… truncated (") {
+		t.Fatalf("description should be truncated after notes are minimized\n%s", description)
+	}
+	if again := RenderIssueBodyWithOptions(task, RenderOptions{}); again != body {
+		t.Fatalf("truncated render is not deterministic")
+	}
+}
+
+func TestRenderIssueBodyShrinkOrderMinimizesNotesBeforeDescription(t *testing.T) {
+	task := sampleTask()
+	task.ParentTaskID = nil
+	task.Dependencies = nil
+	task.Subtasks = nil
+	task.Description = strings.Repeat("description line\n", 3900)
+	task.ImplementationPlan = ""
+	task.ImplementationNotes = strings.Repeat("note\n", 1000)
+	task.FinalSummary = nil
+
+	body := RenderIssueBodyWithOptions(task, RenderOptions{})
+	if chars := countCharacters(body); chars > issueBodyCharacterBudget || chars > githubIssueBodyCharacterLimit {
+		t.Fatalf("render is %d characters, budget %d hard limit %d", chars, issueBodyCharacterBudget, githubIssueBodyCharacterLimit)
+	}
+	notes := markdownSection(t, body, "Implementation notes")
+	if strings.Contains(notes, "note\n") || !strings.Contains(notes, "… truncated (") {
+		t.Fatalf("notes should be minimized first even when that alone cannot fit the body\n%s", notes)
+	}
+	description := markdownSection(t, body, "Description")
+	if !strings.Contains(description, "description line") || !strings.Contains(description, "… truncated (") {
+		t.Fatalf("description should shrink only after notes are minimized\n%s", description)
+	}
+}
+
+func TestRenderIssueBodyTruncatesOnLineBoundary(t *testing.T) {
+	notes := "alpha\n" + strings.Repeat("bravo", 200) + "\ncharlie\n"
+	doc := issueBodyDocument{
+		TaskID:              "task-77",
+		Header:              MarkerFor("TASK-77") + "\nmetadata survives\n\n",
+		Description:         "description",
+		AcceptanceCriteria:  "## Acceptance criteria\nNone\n",
+		ImplementationNotes: &notes,
+	}
+	candidateDoc := doc
+	candidate := truncatedIssueSectionContent(notes, len("alpha"), doc.TaskID)
+	candidateDoc.ImplementationNotes = &candidate
+	got := renderIssueBodyWithinBudget(doc, countCharacters(candidateDoc.String()))
+	notesSection := markdownSection(t, got, "Implementation notes")
+	if !strings.HasPrefix(notesSection, "alpha\n… truncated (") || strings.Contains(notesSection, "bravo") {
+		t.Fatalf("truncation should keep complete lines only\n%s", notesSection)
+	}
+}
+
+func TestRenderIssueBodyClosesFenceBeforeTruncationNote(t *testing.T) {
+	notes := "intro\n```\ncode line\n" + strings.Repeat("more code\n", 1000)
+	doc := issueBodyDocument{
+		TaskID:              "task-78",
+		Header:              MarkerFor("TASK-78") + "\nmetadata survives\n\n",
+		Description:         "description",
+		AcceptanceCriteria:  "## Acceptance criteria\nNone\n",
+		ImplementationNotes: &notes,
+	}
+	candidateDoc := doc
+	candidate := truncatedIssueSectionContent(notes, len("intro\n```\ncode line"), doc.TaskID)
+	candidateDoc.ImplementationNotes = &candidate
+	got := renderIssueBodyWithinBudget(doc, countCharacters(candidateDoc.String()))
+	notesSection := markdownSection(t, got, "Implementation notes")
+	if !strings.Contains(notesSection, "code line\n```\n… truncated (") {
+		t.Fatalf("open code fence should be closed before the truncation note\n%s", notesSection)
+	}
+}
+
 func TestParseMarkerStrictFirstLineAndDotted(t *testing.T) {
 	cases := []struct {
 		name, body, want string
@@ -240,6 +329,70 @@ func TestAppCreateFailureIsolatedToOneTask(t *testing.T) {
 	}
 }
 
+func TestAppOversizedMetadataBodyFailureSkipsCreate(t *testing.T) {
+	ctx := context.Background()
+	root := tempRoot(t)
+	task := sampleTask()
+	task.ParentTaskID = nil
+	task.Dependencies = nil
+	task.Subtasks = nil
+	task.Labels = nil
+	task.Description = "short"
+	task.ImplementationPlan = ""
+	task.ImplementationNotes = ""
+	task.FinalSummary = nil
+	task.AcceptanceCriteria = []AcceptanceCriterion{{Index: 1, Text: strings.Repeat("oversized metadata ", 5000)}}
+	bl := newFakeBacklog(root, task)
+	gh := basicGH(map[string][]Issue{"owner/repo": {}})
+	var logs []string
+	app := App{Git: fakeGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}}, rootClean: true}, Backlog: bl, GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	c, err := app.Run(ctx, testConfig(root))
+	if err == nil || !strings.Contains(err.Error(), "1 task sync operation") {
+		t.Fatalf("expected oversized rendered body to fail the task, counters=%+v err=%v logs=%v", c, err, logs)
+	}
+	if c.Failed != 1 || len(gh.createdIssues) != 0 || gh.ensureLabelCalls != 0 {
+		t.Fatalf("oversized body should skip create and pre-create writes, counters=%+v created=%d labels=%d logs=%v", c, len(gh.createdIssues), gh.ensureLabelCalls, logs)
+	}
+	if !logContains(logs, "render issue body failed") || !logContains(logs, "GitHub hard limit") || !logContains(logs, "1 failed operations") {
+		t.Fatalf("oversized body failure should be clear in logs: %v", logs)
+	}
+}
+
+func TestAppProjectWriteFailureIsolatedToOneTask(t *testing.T) {
+	ctx := context.Background()
+	root := tempRoot(t)
+	cfg := testConfig(root)
+	first := sampleTask()
+	first.ID = "TASK-60"
+	first.Title = "Project add fails"
+	first.ParentTaskID = nil
+	first.Dependencies = nil
+	first.Subtasks = nil
+	second := sampleTask()
+	second.ID = "TASK-61"
+	second.Title = "Create still succeeds"
+	second.ParentTaskID = nil
+	second.Dependencies = nil
+	second.Subtasks = nil
+	existing := Issue{Number: 60, DatabaseID: 60, NodeID: "I_60", HTMLURL: "https://github.com/owner/repo/issues/60", Title: IssueTitle(first), Body: RenderIssueBodyWithOptions(first, RenderOptions{}), State: "open", Repo: "owner/repo", Labels: labelsToIssueLabels(DesiredLabels(first, Issue{}, cfg))}
+	bl := newFakeBacklog(root, first, second)
+	gh := basicGH(map[string][]Issue{"owner/repo": {existing}})
+	gh.items = nil
+	gh.addProjectItemErr = errors.New("project add failed")
+	var logs []string
+	app := App{Git: fakeGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}}, rootClean: true}, Backlog: bl, GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	c, err := app.Run(ctx, cfg)
+	if err == nil || !strings.Contains(err.Error(), "1 task sync operation") {
+		t.Fatalf("expected non-zero run error for project write failure, counters=%+v err=%v logs=%v", c, err, logs)
+	}
+	if c.Failed != 1 || c.Created != 1 || len(gh.createdIssues) != 1 || !logContains(logs, "task-60 add issue to project failed") {
+		t.Fatalf("project write failure should not block other tasks, counters=%+v created=%d logs=%v", c, len(gh.createdIssues), logs)
+	}
+	if findIssueByTitlePrefix(gh.issues["owner/repo"], "task-61:").Number == 0 {
+		t.Fatalf("second task was not created after project write failure, issues=%+v", gh.issues["owner/repo"])
+	}
+}
+
 func TestInboxImportReplayIndexesIssueInSameRun(t *testing.T) {
 	ctx := context.Background()
 	root := tempRoot(t)
@@ -319,8 +472,8 @@ func TestProjectFieldsMilestoneParserAndSubIssueWarnOnce(t *testing.T) {
 	gh.subIssueErr = errors.New("unsupported")
 	app := App{Git: fakeGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}}, rootClean: true}, Backlog: bl, GitHub: gh, Logf: func(string, ...any) {}}
 	c, err := app.Run(ctx, cfg)
-	if err == nil || c.Failed != 1 || !strings.Contains(err.Error(), "1 task sync operation") {
-		t.Fatalf("expected one counted sub-issue failure, counters=%+v err=%v", c, err)
+	if err != nil || c.Failed != 0 {
+		t.Fatalf("expected unsupported sub-issue rejection to warn without failing, counters=%+v err=%v", c, err)
 	}
 	if gh.fieldUpdates == 0 {
 		t.Fatalf("expected project field updates")
@@ -551,7 +704,7 @@ func TestDryRunZeroWritesAndAdoptedIssueFieldReporting(t *testing.T) {
 	}
 }
 
-func TestSubIssueParentDiffForeignParentAndWarnOnce(t *testing.T) {
+func TestSubIssueParentDiffAndExpectedRejectionWarnsOnce(t *testing.T) {
 	ctx := context.Background()
 	root := tempRoot(t)
 	cfg := testConfig(root)
@@ -587,8 +740,17 @@ func TestSubIssueParentDiffForeignParentAndWarnOnce(t *testing.T) {
 	var logs []string
 	app = App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
 	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues)
+	if links != 0 || failed != 0 || strings.Count(strings.Join(logs, "\n"), "sub-issue links are not supported") != 1 || gh.addSubIssueCalls != 2 {
+		t.Fatalf("expected unsupported sub-issue rejection to warn once without failing, links=%d failed=%d calls=%d logs=%v", links, failed, gh.addSubIssueCalls, logs)
+	}
+
+	gh = basicGH(map[string][]Issue{"owner/repo": {parent, child, child2}})
+	gh.subIssueErr = errors.New("api exploded")
+	logs = nil
+	app = App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues)
 	if links != 0 || failed != 2 || strings.Count(strings.Join(logs, "\n"), "add sub-issue") != 2 || !logContains(logs, "task-1.1") || !logContains(logs, "task-1.2") || gh.addSubIssueCalls != 2 {
-		t.Fatalf("expected per-task sub-issue failures, links=%d failed=%d calls=%d logs=%v", links, failed, gh.addSubIssueCalls, logs)
+		t.Fatalf("expected unexpected sub-issue API errors to fail per task, links=%d failed=%d calls=%d logs=%v", links, failed, gh.addSubIssueCalls, logs)
 	}
 }
 
@@ -749,6 +911,20 @@ func tempRoot(t *testing.T) string {
 
 func sampleTask() Task {
 	return Task{ID: "TASK-16", Title: "Backlog sync", Status: "In Progress", Project: sp("apple"), Priority: sp("High"), Labels: []string{"tooling", "ci"}, Milestone: sp("m-0"), ParentTaskID: sp("TASK-1"), Assignees: []string{"@pi-worker"}, CreatedAt: tp("2026-10-01T02:33:00Z"), UpdatedAt: tp("2026-10-01T02:35:00Z"), Description: "Build a sync.", Dependencies: []string{"TASK-1"}, Subtasks: []TaskRef{{ID: "TASK-16.1", Title: "Child"}}, AcceptanceCriteria: []AcceptanceCriterion{{Index: 1, Text: "First", Checked: true}, {Index: 2, Text: "Second", Checked: false}}, ImplementationPlan: "Plan it.", ImplementationNotes: "Built it.", FinalSummary: sp("Finished."), Branch: "task-16-backlog-sync"}
+}
+
+func markdownSection(t *testing.T, body, heading string) string {
+	t.Helper()
+	startMarker := "## " + heading + "\n"
+	start := strings.Index(body, startMarker)
+	if start < 0 {
+		t.Fatalf("section %q not found in body\n%s", heading, body)
+	}
+	section := body[start+len(startMarker):]
+	if end := strings.Index(section, "\n## "); end >= 0 {
+		section = section[:end]
+	}
+	return strings.TrimRight(section, "\n")
 }
 
 func contains(values []string, needle string) bool {
@@ -918,6 +1094,7 @@ type fakeGitHub struct {
 	subIssueErr              error
 	removeSubIssueErr        error
 	updateErr                error
+	addProjectItemErr        error
 	createErrTitleContains   string
 	failOnWrite              bool
 }
@@ -999,6 +1176,9 @@ func (g *fakeGitHub) AddProjectItem(_ context.Context, _ string, contentNodeID s
 		return ProjectItem{}, errors.New("unexpected write")
 	}
 	g.addProjectItemCalls++
+	if g.addProjectItemErr != nil {
+		return ProjectItem{}, g.addProjectItemErr
+	}
 	item := ProjectItem{ID: "PVTI_NEW", ContentNodeID: contentNodeID, FieldValues: map[string]ProjectFieldValue{}}
 	g.items = append(g.items, item)
 	return item, nil

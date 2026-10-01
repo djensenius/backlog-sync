@@ -160,7 +160,7 @@ func truncateIssueSectionToFit(doc *issueBodyDocument, section *string, budget i
 		}
 	}
 	if best < 0 {
-		*section = original
+		*section = truncatedIssueSectionContent(original, 0, doc.TaskID)
 		return
 	}
 	retained := best
@@ -187,7 +187,20 @@ func truncatedIssueSectionContent(original string, retained int, taskID string) 
 	if strings.TrimSpace(prefix) == "" {
 		return marker
 	}
+	if markdownBacktickFenceOpen(prefix) {
+		prefix += "\n```"
+	}
 	return prefix + "\n" + marker
+}
+
+func markdownBacktickFenceOpen(markdown string) bool {
+	open := false
+	for _, line := range strings.Split(markdown, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			open = !open
+		}
+	}
+	return open
 }
 
 func countCharacters(value string) int { return len([]rune(value)) }
