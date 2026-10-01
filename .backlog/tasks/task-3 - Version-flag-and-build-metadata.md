@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@pi'
 created_date: '2026-10-01 15:18'
-updated_date: '2026-10-01 16:04'
+updated_date: '2026-10-01 16:05'
 labels:
   - cli
 milestone: m-0
@@ -34,3 +34,9 @@ Release archives and Homebrew need `backlog-sync --version` to report what's ins
 3. Add/adjust tests to exercise default version output and ldflags-settable variables without network or shelling to GitHub.
 4. Run go test ./... and go vet ./..., then report exact output.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implemented --version handling before config/git setup, added ldflags-settable main.version/main.commit/main.date defaults, and added TestVersionOutputAndFlagBypassConfig. Verified default and injected outputs with go run plus go test ./... and go vet ./... .
+<!-- SECTION:NOTES:END -->
