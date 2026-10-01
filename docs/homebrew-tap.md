@@ -24,17 +24,19 @@ Store only the token value as the repository secret. Do not commit it, print it 
 
 ## What the release workflow does
 
-For every stable `vMAJOR.MINOR.PATCH` tag handled by `.github/workflows/release.yml`:
+`.github/workflows/release.yml` separates draft release creation from tap publication:
 
-1. GoReleaser builds the release archives and `dist/checksums.txt`.
-2. `scripts/homebrew-tap-update.go` reads the release version plus `dist/checksums.txt` and deterministically generates:
+1. A pushed semver tag still runs GoReleaser and creates or replaces the GitHub release as a draft. Stable `vMAJOR.MINOR.PATCH` tag runs also generate a local tap preview from `dist/checksums.txt`, but the tag-push workflow never checks out, pushes to, or opens a PR against `djensenius/homebrew-tap`. Draft-release asset URLs are not public yet, so they are not suitable for a Homebrew formula PR.
+2. When that GitHub release is published, the `release` event job runs for stable `vMAJOR.MINOR.PATCH` tags only. It downloads `checksums.txt` from the public release URL under `https://github.com/djensenius/backlog-sync/releases/download/<tag>/checksums.txt`.
+3. `scripts/homebrew-tap-update.go` reads the published release version plus downloaded checksums and deterministically generates:
    - `Formula/backlog-sync.rb`
    - the generated `backlog-sync` section of the tap `README.md`
-3. If the tag is not a stable `vMAJOR.MINOR.PATCH` tag, the workflow emits a notice and skips all Homebrew tap work.
-4. If `HOMEBREW_TAP_FINE_GRAINED_TOKEN` is not set, the workflow emits a notice and skips all tap checkout, branch, push, and PR steps.
-5. If the secret is set, the workflow checks out `djensenius/homebrew-tap`, applies the same generated files, validates Ruby syntax for the formula, commits the changes on `backlog-sync-<tag>`, pushes that branch to the tap, and opens a PR with `gh pr create --repo djensenius/homebrew-tap`.
+4. If the published release tag is not a stable `vMAJOR.MINOR.PATCH` tag, the workflow emits a notice and skips all Homebrew tap work.
+5. If `HOMEBREW_TAP_FINE_GRAINED_TOKEN` is not set, the workflow emits a notice and skips all tap checkout, branch, push, and PR steps after downloading the public checksums and generating the preview.
+6. If the secret is set, the workflow checks out `djensenius/homebrew-tap`, prepares the managed `backlog-sync-<tag>` branch from the tap `main`, applies the generated files, validates Ruby syntax for the formula, pushes the branch, and opens a PR with `gh pr create --repo djensenius/homebrew-tap`.
+7. If the managed branch or an open PR already exists, a rerun updates the branch and reports the existing PR URL instead of failing because the PR already exists.
 
-The generated formula installs the release archive binary and runs `backlog-sync --version` in its Homebrew `test do` block. It includes URLs and sha256 values for macOS arm64, macOS amd64, Linux arm64, and Linux amd64 assets from GoReleaser.
+The generated formula installs the published release archive binary and runs `backlog-sync --version` in its Homebrew `test do` block. It includes URLs and sha256 values for macOS arm64, macOS amd64, Linux arm64, and Linux amd64 assets from GoReleaser.
 
 ## Local rehearsal without network writes
 
