@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@david'
 created_date: '2026-10-01 15:18'
-updated_date: '2026-10-01 17:03'
+updated_date: '2026-10-01 17:05'
 labels:
   - ci
 milestone: m-0
@@ -36,3 +36,14 @@ Every PR must be checked automatically before merge, on both platforms the tool 
 4. Ensure lint covers actionlint and shellcheck install-launchd.sh.
 5. Run mise run ci plus direct go vet ./... and go test ./..., then record evidence in task notes.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implemented the CI task files within the recorded plan: root mise.toml pins Go 1.27.1 plus actionlint 1.7.12, goreleaser 2.18.2, and shellcheck 0.11.0; tasks include fmt:check, module:check, vet, test, build, lint, and ci, with lint running actionlint and shellcheck install-launchd.sh. Added Go CI and CodeQL workflows with least-privilege permissions and actions pinned to full commit SHAs.
+
+Check evidence:
+- `mise run ci`: succeeded; ran `[test] $ go test ./...`, `[fmt:check] $ files=$(gofmt -l .)`, `[vet] $ go vet ./...`, `[module:check] $ go mod tidy -diff`, `[build] $ go build ./...`, and `[lint] $ actionlint && shellcheck install-launchd.sh`; output ended `Finished in 885.1ms`.
+- `go vet ./...`: succeeded with no output.
+- `go test ./...`: succeeded with `ok  	github.com/djensenius/backlog-sync	(cached)`.
+<!-- SECTION:NOTES:END -->
