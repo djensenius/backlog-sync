@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@david'
 created_date: '2026-10-01 15:18'
-updated_date: '2026-10-01 17:30'
+updated_date: '2026-10-01 17:35'
 labels:
   - ci
   - release
@@ -53,4 +53,15 @@ Check evidence from the task worktree:
 - `go test ./...`: `ok  	github.com/djensenius/backlog-sync	0.170s`.
 - `go vet ./...`: passed with no output.
 - `actionlint .github/workflows/release.yml`: passed with no output.
+
+Reviewer follow-up implemented in commit 83053c5d1ffc777ee618ebca81fc07e45008e785: release workflow now resolves tag commits as refs/tags/${tag}^{commit}, passes GORELEASER_CURRENT_TAG=${{ github.ref_name }} to GoReleaser, disables mise-action caching, and GoReleaser release config sets replace_existing_draft: true.
+
+Follow-up validation from the task worktree:
+- `actionlint .github/workflows/release.yml`: passed; output only the mise deprecation warning about go.mod go directive.
+- `mise run release:check`: `[release:check]   • 1 configuration file(s) validated`; `[release:check] Finished in 42.0ms`.
+- `mise run release:snapshot`: built snapshot version `0.0.0-snapshot-83053c5` for `linux_arm64_v8.0`, `linux_amd64_v1`, `darwin_amd64_v1`, and `darwin_arm64_v8.0`; archived all four tarballs; `release succeeded after 1s`.
+- Snapshot binary: `dist/backlog-sync_darwin_arm64_v8.0/backlog-sync --version` -> `backlog-sync version=0.0.0-snapshot-83053c5 commit=83053c5d1ffc777ee618ebca81fc07e45008e785 date=2026-10-01T17:35:06Z`.
+- `mise run ci`: `[test] ok  	github.com/djensenius/backlog-sync	0.224s`; `Finished in 556.3ms`.
+- `go test ./...`: `ok  	github.com/djensenius/backlog-sync	(cached)`.
+- `go vet ./...`: passed with no output.
 <!-- SECTION:NOTES:END -->
