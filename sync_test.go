@@ -476,6 +476,73 @@ func TestInboxManualModeReportsNeedsTriageWithoutWrites(t *testing.T) {
 	}
 }
 
+func TestInboxManualModeMirrorsMarkedInboxIssueWithoutReporting(t *testing.T) {
+	ctx := context.Background()
+	root := tempRoot(t)
+	task := sampleTask()
+	task.ParentTaskID = nil
+	task.Dependencies = nil
+	task.Subtasks = nil
+	cfg := testConfig(root)
+	cfg.Inbox.Mode = InboxModeManual
+	markedInbox := Issue{Number: 16, DatabaseID: 16, NodeID: "I_16", HTMLURL: "https://github.com/owner/repo/issues/16", Title: "stale title", Body: MarkerFor(task.ID) + "\nstale body", State: "open", Repo: "owner/repo", Labels: []IssueLabel{{Name: "inbox"}, {Name: "external"}}}
+	bl := newFakeBacklog(root, task)
+	gh := basicGH(map[string][]Issue{"owner/repo": {markedInbox}})
+	var logs []string
+	app := App{Git: fakeGit{worktrees: []Worktree{{Path: root, Branch: task.Branch, IsRoot: true}}, rootClean: false, rootReason: "should not matter"}, Backlog: bl, GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	c, err := app.Run(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.InboxTriage != 0 || c.Created != 0 || c.Updated == 0 {
+		t.Fatalf("marked inbox issue should be mirrored, not reported or recreated, counters=%+v", c)
+	}
+	got := gh.issues["owner/repo"][0]
+	if got.Title != IssueTitle(task) || !strings.HasPrefix(got.Body, MarkerFor(task.ID)+"\n") || !hasLabelFold(got, "inbox") {
+		t.Fatalf("marked inbox issue was not mirrored with inbox label preserved: %+v", got)
+	}
+	if logContains(logs, "needs triage") {
+		t.Fatalf("marked inbox issue should not be reported for triage, logs=%v", logs)
+	}
+}
+
+func TestInboxManualModeClaimsUnmarkedInboxBeforeAdoption(t *testing.T) {
+	ctx := context.Background()
+	root := tempRoot(t)
+	task := sampleTask()
+	task.ParentTaskID = nil
+	task.Dependencies = nil
+	task.Subtasks = nil
+	task.Project = nil
+	task.References = []string{"https://github.com/owner/repo/issues/90"}
+	cfg := testConfig(root)
+	cfg.Inbox.Mode = InboxModeManual
+	cfg.AdoptReferencedIssues = true
+	inbox := Issue{Number: 90, DatabaseID: 90, NodeID: "I_90", HTMLURL: "https://github.com/owner/repo/issues/90", Title: "Needs owner triage", Body: "body", State: "open", Repo: "owner/repo", Labels: []IssueLabel{{Name: "inbox"}}}
+	bl := newFakeBacklog(root, task)
+	gh := basicGH(map[string][]Issue{"owner/repo": {inbox}})
+	var logs []string
+	app := App{Git: fakeGit{worktrees: []Worktree{{Path: root, Branch: task.Branch, IsRoot: true}}, rootClean: false, rootReason: "should not matter"}, Backlog: bl, GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	c, err := app.Run(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.InboxTriage != 1 || c.Created != 1 || len(gh.createdIssues) != 1 || len(bl.created) != 0 {
+		t.Fatalf("unmarked manual inbox issue should be reported and task should get a separate issue, counters=%+v createdIssues=%d backlogCreates=%d", c, len(gh.createdIssues), len(bl.created))
+	}
+	original := gh.issues["owner/repo"][0]
+	if original.Title != inbox.Title || original.Body != inbox.Body || !hasLabelFold(original, "inbox") || len(gh.updatedIssues) != 0 {
+		t.Fatalf("unmarked inbox issue should receive zero issue writes, original=%+v updates=%d", original, len(gh.updatedIssues))
+	}
+	created := gh.createdIssues[0]
+	if created.Number == inbox.Number || created.Title != IssueTitle(task) || !strings.HasPrefix(created.Body, MarkerFor(task.ID)+"\n") {
+		t.Fatalf("task should get one new mirrored issue instead of adopting inbox issue, created=%+v", created)
+	}
+	if !logContains(logs, "inbox issue owner/repo#90 needs triage: Needs owner triage") || !logContains(logs, "refusing to adopt owner/repo#90 for task-16 because it is already claimed by manual inbox triage") {
+		t.Fatalf("manual mode should report triage and block adoption, logs=%v", logs)
+	}
+}
+
 func TestValidateConfigRejectsInvalidInboxMode(t *testing.T) {
 	cfg := testConfig("/repo")
 	cfg.Inbox.Mode = "invalid"

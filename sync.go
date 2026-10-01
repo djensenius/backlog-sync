@@ -449,6 +449,15 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 			if issue.State != "open" || !hasLabelFold(issue, cfg.Inbox.Label) {
 				continue
 			}
+			if id, ok := ParseMarkerWithPrefix(issue.Body, cfg.TaskPrefix); ok {
+				if key := issueClaimKey(issue); key != "" {
+					claimedIssues[key] = id
+				}
+				continue
+			}
+			if key := issueClaimKey(issue); key != "" {
+				claimedIssues[key] = "manual inbox triage"
+			}
 			a.Logf("inbox issue %s#%d needs triage: %s", issue.Repo, issue.Number, issue.Title)
 			triage++
 		}
