@@ -1,7 +1,7 @@
 ---
 id: TASK-3
 title: Version flag and build metadata
-status: In Progress
+status: Done
 assignee:
   - '@pi'
 created_date: '2026-10-01 15:18'
