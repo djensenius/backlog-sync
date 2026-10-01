@@ -159,6 +159,9 @@ func shouldSkipWorktree(wt Worktree) bool {
 }
 
 func DiscoverBacklogDir(root string) (string, bool, error) {
+	if path, ok, err := discoverBacklogDirFromRootConfig(root); err != nil || ok {
+		return path, ok, err
+	}
 	for _, rel := range []string{"backlog", ".backlog"} {
 		path := filepath.Join(root, rel)
 		if isBacklogDataDir(path) {
@@ -213,6 +216,116 @@ func DiscoverBacklogDir(root string) (string, bool, error) {
 		return "", false, fmt.Errorf("multiple Backlog data directories found: %s", strings.Join(unique, ", "))
 	}
 	return unique[0], true, nil
+}
+
+func discoverBacklogDirFromRootConfig(root string) (string, bool, error) {
+	configPath := filepath.Join(root, "backlog.config.yml")
+	data, err := os.ReadFile(configPath)
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read %s: %w", configPath, err)
+	}
+	rel, ok, err := parseBacklogDirectory(data)
+	if err != nil {
+		return "", false, fmt.Errorf("parse %s: %w", configPath, err)
+	}
+	if !ok {
+		return "", false, nil
+	}
+	if filepath.IsAbs(rel) {
+		return "", false, fmt.Errorf("%s backlog_directory must be project-relative: %q", configPath, rel)
+	}
+	clean := filepath.Clean(rel)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return "", false, fmt.Errorf("%s backlog_directory must stay inside the worktree: %q", configPath, rel)
+	}
+	path := filepath.Join(root, clean)
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return "", false, fmt.Errorf("%s backlog_directory target %q does not exist", configPath, rel)
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("stat %s backlog_directory target %q: %w", configPath, rel, err)
+	}
+	if !info.IsDir() {
+		return "", false, fmt.Errorf("%s backlog_directory target %q is not a directory", configPath, rel)
+	}
+	return path, true, nil
+}
+
+func parseBacklogDirectory(data []byte) (string, bool, error) {
+	for i, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, rawValue, ok := strings.Cut(line, ":")
+		if !ok || strings.TrimSpace(key) != "backlog_directory" {
+			continue
+		}
+		value := stripYAMLComment(strings.TrimSpace(rawValue))
+		value, err := unquoteYAMLScalar(strings.TrimSpace(value))
+		if err != nil {
+			return "", false, fmt.Errorf("line %d: %w", i+1, err)
+		}
+		if value == "" {
+			return "", false, fmt.Errorf("line %d: backlog_directory is empty", i+1)
+		}
+		return value, true, nil
+	}
+	return "", false, nil
+}
+
+func stripYAMLComment(value string) string {
+	quote := byte(0)
+	escaped := false
+	for i := 0; i < len(value); i++ {
+		ch := value[i]
+		if quote != 0 {
+			if quote == '"' && escaped {
+				escaped = false
+				continue
+			}
+			if quote == '"' && ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		if ch == '"' || ch == '\'' {
+			quote = ch
+			continue
+		}
+		if ch == '#' && (i == 0 || value[i-1] == ' ' || value[i-1] == '\t') {
+			return strings.TrimSpace(value[:i])
+		}
+	}
+	return value
+}
+
+func unquoteYAMLScalar(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	quote := value[0]
+	if quote != '"' && quote != '\'' {
+		return value, nil
+	}
+	if len(value) < 2 || value[len(value)-1] != quote {
+		return "", fmt.Errorf("unterminated quoted backlog_directory")
+	}
+	inner := value[1 : len(value)-1]
+	if quote == '\'' {
+		return strings.ReplaceAll(inner, "''", "'"), nil
+	}
+	inner = strings.ReplaceAll(inner, `\\`, `\`)
+	inner = strings.ReplaceAll(inner, `\"`, `"`)
+	return inner, nil
 }
 
 func isBacklogDataDir(path string) bool {

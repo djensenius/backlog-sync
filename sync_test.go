@@ -484,6 +484,52 @@ func TestValidateConfigRejectsInvalidInboxMode(t *testing.T) {
 	}
 }
 
+func TestDiscoverBacklogDirUsesRootConfigCustomDirectory(t *testing.T) {
+	root := t.TempDir()
+	customRel := "custom # backlog"
+	customPath := filepath.Join(root, customRel)
+	if err := os.MkdirAll(filepath.Join(customPath, "tasks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("# root Backlog.md config\nbacklog_directory: \"custom # backlog\" # data folder has no config.yml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := DiscoverBacklogDir(root)
+	if err != nil || !ok || got != customPath {
+		t.Fatalf("DiscoverBacklogDir=%q %v err=%v, want %q true nil", got, ok, err, customPath)
+	}
+}
+
+func TestDiscoverBacklogDirUsesRootConfigForBuiltinDirectories(t *testing.T) {
+	for _, rel := range []string{"backlog", ".backlog"} {
+		t.Run(rel, func(t *testing.T) {
+			root := t.TempDir()
+			want := filepath.Join(root, rel)
+			if err := os.MkdirAll(filepath.Join(want, "tasks"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("backlog_directory: '"+rel+"/' # root config, no folder-local config.yml\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			got, ok, err := DiscoverBacklogDir(root)
+			if err != nil || !ok || got != want {
+				t.Fatalf("DiscoverBacklogDir=%q %v err=%v, want %q true nil", got, ok, err, want)
+			}
+		})
+	}
+}
+
+func TestDiscoverBacklogDirRootConfigMissingTargetErrors(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("backlog_directory: missing # target is absent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, ok, err := DiscoverBacklogDir(root)
+	if err == nil || ok || !strings.Contains(err.Error(), "backlog.config.yml") || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("expected clear missing-target error, ok=%v err=%v", ok, err)
+	}
+}
+
 func TestCollectTasksDiscoversHiddenAndCustomBacklogDirs(t *testing.T) {
 	root := t.TempDir()
 	hidden := t.TempDir()
