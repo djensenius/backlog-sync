@@ -23,7 +23,7 @@ The binary is consumer-neutral. All repo/project choices come from a JSON config
   "defaultRepo": "djensenius/ArkhamHorror-Project",
   "mainBranch": "main",
   "statusMap": {},
-  "inbox": { "enabled": true, "label": "inbox", "push": true },
+  "inbox": { "enabled": true, "label": "inbox", "mode": "push", "push": true },
   "adoptReferencedIssues": false,
   "labels": {
     "managed": ["backlog", "type:*", "area:*", "priority:*", "upstream-candidate", "roadmap", "owner"],
@@ -54,7 +54,7 @@ Canadian Ham config committed at the repository root:
   "defaultRepo": "djensenius/canadian-ham",
   "mainBranch": "main",
   "statusMap": {},
-  "inbox": { "enabled": true, "label": "inbox", "push": true },
+  "inbox": { "enabled": true, "label": "inbox", "mode": "pr" },
   "adoptReferencedIssues": false,
   "labels": { "managed": ["*"], "addAlways": [] },
   "subIssues": true,
@@ -66,11 +66,11 @@ Canadian Ham config committed at the repository root:
 
 ## Cross-worktree Backlog reads
 
-The tool runs `git -C <root> worktree list --porcelain`, skips bare/prunable/missing worktrees and worktrees without `backlog/`, then reads each worktree through the `backlog` CLI (`task list --json` with pagination and `task view <id> --json`). Pagination is validated against the reported `total`. The main worktree must be scanned and must return at least one task before any GitHub call is made.
+The tool runs `git -C <root> worktree list --porcelain`, skips bare/prunable/missing worktrees and worktrees without a Backlog data directory, then reads each worktree through the `backlog` CLI (`task list --json` with pagination and `task view <id> --json`). The data directory is discovered read-only from the worktree: `backlog/` and `.backlog/` are preferred, and a single custom directory containing Backlog `config.yml` plus task data is accepted. Pagination is validated against the reported `total`. The main worktree must be scanned and must return at least one task before any GitHub call is made.
 
 `BACKLOG_CWD` and other `BACKLOG_*` environment variables are stripped from child processes so the CLI reads the intended worktree. Remote-only branches without a local worktree are out of scope.
 
-Task IDs use the Backlog task prefix read from `backlog config get taskPrefix` / `task_prefix`, falling back to read-only parsing of `backlog/config.yml` when needed. IDs are normalized to lowercase for markers and title prefixes, including dotted IDs such as `task-1.2.7`.
+Task IDs use the Backlog task prefix read from `backlog config get taskPrefix` / `task_prefix`, falling back to read-only parsing of the discovered Backlog `config.yml` when needed. IDs are normalized to lowercase for markers and title prefixes, including dotted IDs such as `task-1.2.7`.
 
 ## Task resolution and placement
 
@@ -111,9 +111,12 @@ When `subIssues` is true, the tool checks each child issue's current GitHub pare
 
 Open issues labelled with the configured inbox label are scanned in every configured repo. The inbox label is not a managed mirror label.
 
-Before creating a task, the root worktree must be on `mainBranch`, not mid-merge/rebase/cherry-pick, and have a clean worktree/index. The tool first checks whether any task already references the issue URL; if so, it reuses that task and only marks the issue. Otherwise it creates a task with `--ref <issue URL>`, `--project <reverse-mapped project>` when applicable, and the issue body as the description. It then immediately removes the inbox label, prepends the marker, and retitles the issue. After any inbox creation, `git -C <root> push origin <mainBranch>` runs when `inbox.push` is true; push failures are logged without aborting. Existing tasks are never updated.
+`inbox.mode` selects how new tasks are imported:
 
-`--dry-run` performs no GitHub, Backlog, or git writes.
+- `push` preserves the direct-commit behavior used by repositories whose Backlog branch is allowed to take direct commits. Before creating a task, the root worktree must be on `mainBranch`, not mid-merge/rebase/cherry-pick, and have a clean worktree/index. The tool first checks whether any task already references the issue URL; if so, it reuses that task and only marks the issue. Otherwise it creates a task with `--ref <issue URL>`, `--project <reverse-mapped project>` when applicable, and the issue body as the description. It then immediately removes the inbox label, prepends the marker, and retitles the issue. After any inbox creation, `git -C <root> push origin <mainBranch>` runs when legacy `inbox.push` is true; push failures are logged without aborting.
+- `pr` is for pull-request-only repositories such as Canadian Ham. The tool never commits to or pushes `main`. It resolves the root repository from `origin`, refuses it unless that owner/name is in the configured repo allowlist, fetches `origin/<mainBranch>`, creates a temporary `git worktree` under `os.TempDir()` on a deterministic branch such as `inbox/owner-repo-123`, creates the Backlog task there, pushes that branch, and opens a PR with `gh pr create --repo <owner/name>` titled `<task-id>: <issue title>`. The PR body includes a stable inbox marker and issue link. Before creating a PR, open PRs are searched by head branch and by that marker so crash replay or re-runs do not create a second PR for the same issue. After the PR exists, the inbox label is removed from the issue; the issue receives the normal Backlog marker later when the PR merges and the task is visible from the main worktree.
+
+Existing tasks are never updated. `--dry-run` performs no GitHub, Backlog, or git writes and logs the planned PR branch/open operation for `pr` mode.
 
 ## Flags
 
@@ -160,7 +163,7 @@ ArkhamHorror uses the same binary with a temporary or private config, for exampl
   },
   "defaultRepo": "djensenius/ArkhamHorror-Project",
   "mainBranch": "main",
-  "inbox": { "enabled": true, "label": "inbox", "push": true },
+  "inbox": { "enabled": true, "label": "inbox", "mode": "push", "push": true },
   "adoptReferencedIssues": true,
   "labels": {
     "managed": ["backlog", "type:*", "area:*", "priority:*", "upstream-candidate", "roadmap", "owner"],

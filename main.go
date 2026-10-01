@@ -169,6 +169,9 @@ func validateConfig(cfg Config) error {
 	if !strings.Contains(cfg.DefaultRepo, "/") {
 		return fmt.Errorf("defaultRepo must be owner/name")
 	}
+	if cfg.Inbox.Mode != InboxModePush && cfg.Inbox.Mode != InboxModePR {
+		return fmt.Errorf("inbox.mode must be %q or %q", InboxModePush, InboxModePR)
+	}
 	for project, repo := range cfg.Repos {
 		if project == "" || !strings.Contains(repo, "/") {
 			return fmt.Errorf("repos entries must map non-empty project names to owner/name repos")

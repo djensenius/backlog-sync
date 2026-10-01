@@ -115,14 +115,21 @@ func (b ExecBacklog) TaskPrefix(ctx context.Context, dir string) (string, error)
 			}
 		}
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "backlog", "config.yml"))
+	backlogDir, ok, err := DiscoverBacklogDir(dir)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", errors.New("Backlog data directory not found")
+	}
+	data, err := os.ReadFile(filepath.Join(backlogDir, "config.yml"))
 	if err != nil {
 		return "", err
 	}
 	re := regexp.MustCompile(`(?m)^task_prefix:\s*"?([^"\n]+)"?\s*$`)
 	m := re.FindSubmatch(data)
 	if len(m) < 2 {
-		return "", errors.New("task_prefix not found in backlog/config.yml")
+		return "", fmt.Errorf("task_prefix not found in %s", filepath.Join(backlogDir, "config.yml"))
 	}
 	return strings.ToLower(strings.TrimSpace(string(m[1]))), nil
 }
@@ -268,6 +275,57 @@ func ParseWorktrees(input string, root string) []Worktree {
 	}
 	flush()
 	return out
+}
+
+func (g ExecGit) RemoteRepo(ctx context.Context, root, remote string) (string, error) {
+	out, err := g.Runner.Run(ctx, "", "git", []string{"-C", root, "remote", "get-url", remote}, nil)
+	if err != nil {
+		return "", err
+	}
+	repo, err := parseGitHubRepoURL(strings.TrimSpace(string(out)))
+	if err != nil {
+		return "", err
+	}
+	return repo, nil
+}
+
+func (g ExecGit) Fetch(ctx context.Context, root, remote, branch string) error {
+	refspec := fmt.Sprintf("%s:refs/remotes/%s/%s", branch, remote, branch)
+	_, err := g.Runner.Run(ctx, "", "git", []string{"-C", root, "fetch", remote, refspec}, nil)
+	return err
+}
+
+func (g ExecGit) AddWorktree(ctx context.Context, root, path, branch, startPoint string) error {
+	_, err := g.Runner.Run(ctx, "", "git", []string{"-C", root, "worktree", "add", "-b", branch, path, startPoint}, nil)
+	return err
+}
+
+func (g ExecGit) RemoveWorktree(ctx context.Context, root, path string) error {
+	_, err := g.Runner.Run(ctx, "", "git", []string{"-C", root, "worktree", "remove", "--force", path}, nil)
+	return err
+}
+
+func (g ExecGit) PushBranch(ctx context.Context, dir, branch string) error {
+	_, err := g.Runner.Run(ctx, "", "git", []string{"-C", dir, "push", "-u", "origin", branch}, nil)
+	return err
+}
+
+func parseGitHubRepoURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimSuffix(raw, ".git")
+	if strings.HasPrefix(raw, "git@github.com:") {
+		repo := strings.TrimPrefix(raw, "git@github.com:")
+		if strings.Count(repo, "/") == 1 {
+			return repo, nil
+		}
+	}
+	if u, err := url.Parse(raw); err == nil && strings.EqualFold(u.Host, "github.com") {
+		repo := strings.TrimPrefix(u.Path, "/")
+		if strings.Count(repo, "/") == 1 {
+			return repo, nil
+		}
+	}
+	return "", fmt.Errorf("unsupported GitHub remote URL %q", raw)
 }
 
 func fileExists(path string) bool { _, err := os.Stat(path); return err == nil }
@@ -583,6 +641,32 @@ func (g ExecGitHub) RemoveSubIssue(ctx context.Context, parentNodeID string, chi
 	payload := map[string]any{"query": query, "variables": map[string]any{"parent": parentNodeID, "child": childNodeID}}
 	_, err := g.ghJSON(ctx, []string{"api", "graphql", "--input", "-"}, payload)
 	return err
+}
+
+func (g ExecGitHub) ListOpenPullRequests(ctx context.Context, repo string) ([]PullRequest, error) {
+	if err := g.checkRepo(repo); err != nil {
+		return nil, err
+	}
+	out, err := g.Runner.Run(ctx, "", "gh", []string{"pr", "list", "--repo", repo, "--state", "open", "--json", "number,url,title,body,headRefName", "--limit", "100"}, nil)
+	if err != nil {
+		return nil, err
+	}
+	var prs []PullRequest
+	if err := json.Unmarshal(out, &prs); err != nil {
+		return nil, err
+	}
+	return prs, nil
+}
+
+func (g ExecGitHub) CreatePullRequest(ctx context.Context, repo, head, base, title, body string) (PullRequest, error) {
+	if err := g.checkRepo(repo); err != nil {
+		return PullRequest{}, err
+	}
+	out, err := g.Runner.Run(ctx, "", "gh", []string{"pr", "create", "--repo", repo, "--head", head, "--base", base, "--title", title, "--body", body}, nil)
+	if err != nil {
+		return PullRequest{}, err
+	}
+	return PullRequest{URL: strings.TrimSpace(string(out)), Title: title, Body: body, HeadRefName: head}, nil
 }
 
 func (g ExecGitHub) ghJSON(ctx context.Context, args []string, payload any) ([]byte, error) {

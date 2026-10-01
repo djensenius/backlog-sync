@@ -23,6 +23,11 @@ type Backlog interface {
 type Git interface {
 	Worktrees(ctx context.Context, root string) ([]Worktree, error)
 	RootBranchClean(ctx context.Context, root, mainBranch string) (bool, string, error)
+	RemoteRepo(ctx context.Context, root, remote string) (string, error)
+	Fetch(ctx context.Context, root, remote, branch string) error
+	AddWorktree(ctx context.Context, root, path, branch, startPoint string) error
+	RemoveWorktree(ctx context.Context, root, path string) error
+	PushBranch(ctx context.Context, dir, branch string) error
 }
 
 type GitHub interface {
@@ -40,6 +45,8 @@ type GitHub interface {
 	IssueParent(ctx context.Context, issueNodeID string) (IssueParentInfo, error)
 	AddSubIssue(ctx context.Context, parentRepo string, parentNumber int, childDatabaseID int64) error
 	RemoveSubIssue(ctx context.Context, parentNodeID string, childNodeID string) error
+	ListOpenPullRequests(ctx context.Context, repo string) ([]PullRequest, error)
+	CreatePullRequest(ctx context.Context, repo, head, base, title, body string) (PullRequest, error)
 }
 
 func CollectTasks(ctx context.Context, cfg Config, git Git, backlog Backlog, logf func(string, ...any)) (ResolvedTasks, error) {
@@ -54,11 +61,15 @@ func CollectTasks(ctx context.Context, cfg Config, git Git, backlog Backlog, log
 		if shouldSkipWorktree(wt) {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(wt.Path, "backlog")); err != nil {
+		if dir, ok, err := DiscoverBacklogDir(wt.Path); err != nil {
+			return ResolvedTasks{}, fmt.Errorf("discover Backlog directory in %s: %w", wt.Path, err)
+		} else if !ok {
 			if logf != nil {
-				logf("skip worktree without backlog/: %s", wt.Path)
+				logf("skip worktree without Backlog config: %s", wt.Path)
 			}
 			continue
+		} else if logf != nil {
+			logf("scan Backlog directory %s", dir)
 		}
 		summaries, err := listAllTasks(ctx, backlog, wt.Path)
 		if err != nil {
@@ -146,6 +157,78 @@ func shouldSkipWorktree(wt Worktree) bool {
 		return true
 	}
 	return false
+}
+
+func DiscoverBacklogDir(root string) (string, bool, error) {
+	for _, rel := range []string{"backlog", ".backlog"} {
+		path := filepath.Join(root, rel)
+		if isBacklogDataDir(path) {
+			return path, true, nil
+		}
+	}
+	var found []string
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if path == root {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			name := entry.Name()
+			if name == ".git" || name == "node_modules" || name == ".build" || name == "DerivedData" {
+				return filepath.SkipDir
+			}
+			if strings.Count(rel, string(os.PathSeparator)) >= 3 {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.Name() != "config.yml" {
+			return nil
+		}
+		dir := filepath.Dir(path)
+		if isBacklogDataDir(dir) {
+			found = append(found, dir)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", false, err
+	}
+	sort.Strings(found)
+	unique := found[:0]
+	for _, dir := range found {
+		if len(unique) == 0 || unique[len(unique)-1] != dir {
+			unique = append(unique, dir)
+		}
+	}
+	if len(unique) == 0 {
+		return "", false, nil
+	}
+	if len(unique) > 1 {
+		return "", false, fmt.Errorf("multiple Backlog data directories found: %s", strings.Join(unique, ", "))
+	}
+	return unique[0], true, nil
+}
+
+func isBacklogDataDir(path string) bool {
+	info, err := os.Stat(filepath.Join(path, "config.yml"))
+	if err != nil || info.IsDir() {
+		return false
+	}
+	if taskInfo, err := os.Stat(filepath.Join(path, "tasks")); err == nil && taskInfo.IsDir() {
+		return true
+	}
+	data, err := os.ReadFile(filepath.Join(path, "config.yml"))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), "task_prefix:") || strings.Contains(string(data), "statuses:")
 }
 
 func ResolveTaskCopy(id string, copies []TaskCopy, statusRank map[string]int, root string) TaskCopy {

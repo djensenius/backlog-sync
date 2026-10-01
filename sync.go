@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -442,13 +444,16 @@ func DiffIssue(task Task, issue Issue, body string, labels []string) (IssuePatch
 }
 
 func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, markerIssues map[string]Issue, issueByTaskID map[string]Issue, claimedIssues map[string]string, resolved ResolvedTasks) (imported int, linked map[string]Issue, err error) {
-	clean, reason, err := a.Git.RootBranchClean(ctx, cfg.Root, cfg.MainBranch)
-	if err != nil {
-		return 0, nil, err
+	clean, reason := true, ""
+	if cfg.Inbox.Mode == InboxModePush {
+		clean, reason, err = a.Git.RootBranchClean(ctx, cfg.Root, cfg.MainBranch)
+		if err != nil {
+			return 0, nil, err
+		}
 	}
 	linked = map[string]Issue{}
 	defer func() {
-		if imported > 0 && cfg.Inbox.Push && !cfg.DryRun {
+		if cfg.Inbox.Mode == InboxModePush && imported > 0 && cfg.Inbox.Push && !cfg.DryRun {
 			if pushErr := a.Backlog.Push(ctx, cfg.Root, cfg.MainBranch); pushErr != nil {
 				a.Logf("warning: push %s failed after inbox import: %v", cfg.MainBranch, pushErr)
 			}
@@ -505,18 +510,33 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 			}
 		}
 		if taskID == "" {
-			description := strings.TrimSpace(issue.Body)
-			project := cfg.ProjectForRepo(issue.Repo)
-			if cfg.DryRun {
-				a.Logf("would create task from %s#%d", issue.Repo, issue.Number)
-				taskID = strings.ToUpper(cfg.TaskPrefix) + "-DRY-RUN"
-			} else {
-				id, err := a.Backlog.CreateTask(ctx, cfg.Root, CreateTaskInput{Title: issue.Title, Description: description, Labels: []string{}, Project: project, References: []string{issueURL}, TaskPrefix: cfg.TaskPrefix})
+			switch cfg.Inbox.Mode {
+			case InboxModePR:
+				created, err := a.ensureInboxPullRequest(ctx, cfg, issue, issueURL)
 				if err != nil {
 					return imported, linked, err
 				}
-				taskID = id
-				imported++
+				if created {
+					imported++
+				}
+				if err := a.stripInboxLabel(ctx, cfg, issue); err != nil {
+					return imported, linked, err
+				}
+				continue
+			case InboxModePush:
+				description := strings.TrimSpace(issue.Body)
+				project := cfg.ProjectForRepo(issue.Repo)
+				if cfg.DryRun {
+					a.Logf("would create task from %s#%d", issue.Repo, issue.Number)
+					taskID = strings.ToUpper(cfg.TaskPrefix) + "-DRY-RUN"
+				} else {
+					id, err := a.Backlog.CreateTask(ctx, cfg.Root, CreateTaskInput{Title: issue.Title, Description: description, Labels: []string{}, Project: project, References: []string{issueURL}, TaskPrefix: cfg.TaskPrefix})
+					if err != nil {
+						return imported, linked, err
+					}
+					taskID = id
+					imported++
+				}
 			}
 		} else {
 			a.Logf("reuse existing referenced task %s for issue %s#%d", CanonicalTaskID(taskID), issue.Repo, issue.Number)
@@ -541,6 +561,94 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 		}
 	}
 	return imported, linked, nil
+}
+
+func (a *App) ensureInboxPullRequest(ctx context.Context, cfg Config, issue Issue, issueURL string) (created bool, err error) {
+	rootRepo, err := a.Git.RemoteRepo(ctx, cfg.Root, "origin")
+	if err != nil {
+		return false, err
+	}
+	if !cfg.RepoAllowed(rootRepo) {
+		return false, fmt.Errorf("root repo %s is not in configured repo allowlist", rootRepo)
+	}
+	branch := inboxBranchName(issue)
+	marker := inboxPRMarker(issue)
+	prs, err := a.GitHub.ListOpenPullRequests(ctx, rootRepo)
+	if err != nil {
+		return false, err
+	}
+	if pr, ok := findInboxPullRequest(prs, branch, marker); ok {
+		a.Logf("reuse existing inbox PR %s for issue %s#%d", pr.URL, issue.Repo, issue.Number)
+		return false, nil
+	}
+	if cfg.DryRun {
+		a.Logf("would create task from %s#%d on branch %s and open PR in %s", issue.Repo, issue.Number, branch, rootRepo)
+		return false, nil
+	}
+	if err := a.Git.Fetch(ctx, cfg.Root, "origin", cfg.MainBranch); err != nil {
+		return false, err
+	}
+	tmpParent, err := os.MkdirTemp("", "backlog-sync-inbox-*")
+	if err != nil {
+		return false, err
+	}
+	tmp := filepath.Join(tmpParent, "worktree")
+	worktreeAdded := false
+	defer func() {
+		if worktreeAdded {
+			if removeErr := a.Git.RemoveWorktree(ctx, cfg.Root, tmp); removeErr != nil && err == nil {
+				err = removeErr
+			}
+		}
+		if removeErr := os.RemoveAll(tmpParent); removeErr != nil && err == nil {
+			err = removeErr
+		}
+	}()
+	if err := a.Git.AddWorktree(ctx, cfg.Root, tmp, branch, "origin/"+cfg.MainBranch); err != nil {
+		return false, err
+	}
+	worktreeAdded = true
+	description := strings.TrimSpace(issue.Body)
+	project := cfg.ProjectForRepo(issue.Repo)
+	taskID, err := a.Backlog.CreateTask(ctx, tmp, CreateTaskInput{Title: issue.Title, Description: description, Labels: []string{}, Project: project, References: []string{issueURL}, TaskPrefix: cfg.TaskPrefix})
+	if err != nil {
+		return false, err
+	}
+	if err := a.Git.PushBranch(ctx, tmp, branch); err != nil {
+		return false, err
+	}
+	title := fmt.Sprintf("%s: %s", CanonicalTaskID(taskID), issue.Title)
+	body := inboxPRBody(issue, issueURL)
+	pr, err := a.GitHub.CreatePullRequest(ctx, rootRepo, branch, cfg.MainBranch, title, body)
+	if err != nil {
+		return false, err
+	}
+	a.Logf("created inbox PR %s for issue %s#%d", pr.URL, issue.Repo, issue.Number)
+	return true, nil
+}
+
+func inboxBranchName(issue Issue) string {
+	repo := strings.ToLower(issue.Repo)
+	replacer := strings.NewReplacer("/", "-", "_", "-", " ", "-")
+	repo = replacer.Replace(repo)
+	return fmt.Sprintf("inbox/%s-%d", repo, issue.Number)
+}
+
+func inboxPRMarker(issue Issue) string {
+	return fmt.Sprintf("<!-- backlog-sync:inbox %s#%d -->", strings.ToLower(issue.Repo), issue.Number)
+}
+
+func inboxPRBody(issue Issue, issueURL string) string {
+	return fmt.Sprintf("%s\n\nImports inbox issue %s.\n\nCreated by `tools/backlog-sync` in inbox `pr` mode.", inboxPRMarker(issue), issueURL)
+}
+
+func findInboxPullRequest(prs []PullRequest, branch, marker string) (PullRequest, bool) {
+	for _, pr := range prs {
+		if pr.HeadRefName == branch || strings.Contains(pr.Body, marker) {
+			return pr, true
+		}
+	}
+	return PullRequest{}, false
 }
 
 func (a *App) stripInboxLabel(ctx context.Context, cfg Config, issue Issue) error {
