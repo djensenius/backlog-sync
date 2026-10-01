@@ -1,0 +1,186 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+)
+
+type Backlog interface {
+	ListTasks(ctx context.Context, dir string, maxCount, skip int) (TaskListResponse, error)
+	ViewTask(ctx context.Context, dir, id string) (TaskViewResponse, error)
+	Statuses(ctx context.Context, dir string) ([]string, error)
+	CreateTask(ctx context.Context, dir, title, description string, labels []string) (string, error)
+}
+
+type Git interface {
+	Worktrees(ctx context.Context, root string) ([]Worktree, error)
+	RootBranchClean(ctx context.Context, root string) (bool, string, error)
+}
+
+type GitHub interface {
+	ListIssues(ctx context.Context, repo string) ([]Issue, error)
+	CreateIssue(ctx context.Context, repo string, title string, body string, labels []string) (Issue, error)
+	UpdateIssue(ctx context.Context, repo string, number int, patch IssuePatch) (Issue, error)
+	EnsureLabel(ctx context.Context, repo, label string) error
+	ProjectInfo(ctx context.Context, owner string, number int) (ProjectInfo, error)
+	ListProjectItems(ctx context.Context, projectID string) ([]ProjectItem, error)
+	AddProjectItem(ctx context.Context, projectID, contentNodeID string) (ProjectItem, error)
+	UpdateProjectStatus(ctx context.Context, projectID, itemID, fieldID, optionID string) error
+}
+
+func CollectTasks(ctx context.Context, root string, git Git, backlog Backlog, logf func(string, ...any)) (ResolvedTasks, error) {
+	worktrees, err := git.Worktrees(ctx, root)
+	if err != nil {
+		return ResolvedTasks{}, err
+	}
+	copies := make(map[string][]TaskCopy)
+	mainTaskCount := -1
+	for _, wt := range worktrees {
+		if shouldSkipWorktree(wt) {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(wt.Path, "backlog")); err != nil {
+			if logf != nil {
+				logf("skip worktree without backlog/: %s", wt.Path)
+			}
+			continue
+		}
+		summaries, err := listAllTasks(ctx, backlog, wt.Path)
+		if err != nil {
+			return ResolvedTasks{}, fmt.Errorf("list tasks in %s: %w", wt.Path, err)
+		}
+		if wt.IsRoot {
+			mainTaskCount = len(summaries)
+		}
+		for _, summary := range summaries {
+			view, err := backlog.ViewTask(ctx, wt.Path, summary.ID)
+			if err != nil {
+				return ResolvedTasks{}, fmt.Errorf("view %s in %s: %w", summary.ID, wt.Path, err)
+			}
+			task := view.Task
+			task.ID = UpperTaskID(task.ID)
+			task.Branch = wt.Branch
+			task.WorktreePath = wt.Path
+			copies[CanonicalTaskID(task.ID)] = append(copies[CanonicalTaskID(task.ID)], TaskCopy{Task: task, Worktree: wt})
+		}
+	}
+	if mainTaskCount == 0 {
+		return ResolvedTasks{}, fmt.Errorf("safety abort: main worktree %s returned 0 tasks", root)
+	}
+	if mainTaskCount < 0 {
+		return ResolvedTasks{}, fmt.Errorf("safety abort: main worktree %s was not scanned", root)
+	}
+	statuses, err := backlog.Statuses(ctx, root)
+	if err != nil {
+		return ResolvedTasks{}, fmt.Errorf("read backlog statuses: %w", err)
+	}
+	statusRank := make(map[string]int, len(statuses))
+	for i, status := range statuses {
+		statusRank[status] = i
+	}
+	resolved := ResolvedTasks{ByID: map[string]Task{}, BranchByID: map[string]string{}}
+	ids := make([]string, 0, len(copies))
+	for id := range copies {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		winner := ResolveTaskCopy(id, copies[id], statusRank, root)
+		resolved.Tasks = append(resolved.Tasks, winner.Task)
+		resolved.ByID[id] = winner.Task
+		resolved.BranchByID[id] = winner.Worktree.Branch
+	}
+	return resolved, nil
+}
+
+func listAllTasks(ctx context.Context, backlog Backlog, dir string) ([]TaskSummary, error) {
+	const pageSize = 100
+	var out []TaskSummary
+	skip := 0
+	for {
+		page, err := backlog.ListTasks(ctx, dir, pageSize, skip)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, page.Tasks...)
+		if page.NextSkip == nil {
+			break
+		}
+		if *page.NextSkip <= skip {
+			return nil, fmt.Errorf("invalid nextSkip %d after skip %d", *page.NextSkip, skip)
+		}
+		skip = *page.NextSkip
+	}
+	return out, nil
+}
+
+func shouldSkipWorktree(wt Worktree) bool {
+	if wt.Path == "" || wt.Bare || wt.Prunable || wt.Missing {
+		return true
+	}
+	if _, err := os.Stat(wt.Path); err != nil {
+		return true
+	}
+	return false
+}
+
+func ResolveTaskCopy(id string, copies []TaskCopy, statusRank map[string]int, root string) TaskCopy {
+	if len(copies) == 0 {
+		return TaskCopy{}
+	}
+	for _, copy := range copies {
+		if BranchOwnsTask(id, copy.Worktree.Branch) {
+			return copy
+		}
+	}
+	sort.SliceStable(copies, func(i, j int) bool {
+		left, right := copies[i], copies[j]
+		lt, rt := taskTimestamp(left.Task), taskTimestamp(right.Task)
+		if !lt.Equal(rt) {
+			return lt.After(rt)
+		}
+		lr, rr := statusRankValue(statusRank, left.Task.Status), statusRankValue(statusRank, right.Task.Status)
+		if lr != rr {
+			return lr > rr
+		}
+		if left.Worktree.IsRoot != right.Worktree.IsRoot {
+			return left.Worktree.IsRoot
+		}
+		if left.Worktree.Path == root && right.Worktree.Path != root {
+			return true
+		}
+		if left.Worktree.Path != root && right.Worktree.Path == root {
+			return false
+		}
+		return left.Worktree.Path < right.Worktree.Path
+	})
+	return copies[0]
+}
+
+func BranchOwnsTask(id, branch string) bool {
+	id = CanonicalTaskID(id)
+	branch = strings.ToLower(branch)
+	return strings.HasPrefix(branch, id+"-")
+}
+
+func taskTimestamp(task Task) time.Time {
+	if task.UpdatedAt != nil {
+		return *task.UpdatedAt
+	}
+	if task.CreatedAt != nil {
+		return *task.CreatedAt
+	}
+	return time.Time{}
+}
+
+func statusRankValue(rank map[string]int, status string) int {
+	if value, ok := rank[status]; ok {
+		return value
+	}
+	return -1
+}
