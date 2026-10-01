@@ -1,10 +1,11 @@
 ---
 id: TASK-5
 title: 'Homebrew formula in djensenius/homebrew-tap, updated by pull request'
-status: To Do
+status: In Progress
 assignee:
-  - '@djensenius'
+  - '@david'
 created_date: '2026-10-01 15:18'
+updated_date: '2026-10-01 18:13'
 labels:
   - release
 milestone: m-0
@@ -26,3 +27,12 @@ The owner installs Backlog.md with Homebrew and wants backlog-sync distributed t
 - [ ] #3 The token the pipeline needs is a fine-grained token created by the owner and stored as a repository secret (documented; never committed)
 - [ ] #4 `brew install djensenius/tap/backlog-sync` works for the first release
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Prepare all token-independent Homebrew release plumbing in this repository: document the planned fine-grained token/secret name and update release automation so the tap PR step is gated on that secret.
+2. Add deterministic formula/README update generation for djensenius/homebrew-tap using release assets/checksums, with dry-run/local validation where possible.
+3. Add or document validation commands for the generated formula and `backlog-sync --version` test path, without committing any secret.
+4. Leave token-dependent and first-release-only acceptance evidence (actual tap PR creation and `brew install djensenius/tap/backlog-sync`) clearly noted as blocked until the owner stores the token and a stable release exists.
+<!-- SECTION:PLAN:END -->
