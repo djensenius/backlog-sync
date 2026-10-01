@@ -242,7 +242,7 @@ func (a *App) Run(ctx context.Context, cfg Config) (Counters, error) {
 		}
 	}
 	if cfg.SubIssues {
-		linked, failed := a.syncSubIssues(ctx, cfg, resolved, issueByTaskID)
+		linked, failed := a.syncSubIssues(ctx, cfg, resolved, issueByTaskID, claimedIssues)
 		counters.SubIssueLinks += linked
 		counters.Failed += failed
 	}
@@ -442,6 +442,8 @@ func DiffIssue(task Task, issue Issue, body string, labels []string) (IssuePatch
 	return patch, fields
 }
 
+const manualInboxTriageClaim = "manual inbox triage"
+
 func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, markerIssues map[string]Issue, issueByTaskID map[string]Issue, claimedIssues map[string]string, resolved ResolvedTasks) (imported int, triage int, linked map[string]Issue, err error) {
 	linked = map[string]Issue{}
 	if cfg.Inbox.Mode == InboxModeManual {
@@ -456,7 +458,7 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 				continue
 			}
 			if key := issueClaimKey(issue); key != "" {
-				claimedIssues[key] = "manual inbox triage"
+				claimedIssues[key] = manualInboxTriageClaim
 			}
 			a.Logf("inbox issue %s#%d needs triage: %s", issue.Repo, issue.Number, issue.Title)
 			triage++
@@ -580,6 +582,13 @@ func issueClaimKey(issue Issue) string {
 		return ""
 	}
 	return strings.ToLower(fmt.Sprintf("%s#%d", issue.Repo, issue.Number))
+}
+
+func isManualInboxTriageClaim(issue IssueParentInfo, claimedIssues map[string]string) bool {
+	if issue.Repo == "" || issue.Number == 0 {
+		return false
+	}
+	return claimedIssues[strings.ToLower(fmt.Sprintf("%s#%d", issue.Repo, issue.Number))] == manualInboxTriageClaim
 }
 
 func sameIssue(a, b Issue) bool {
@@ -815,7 +824,7 @@ func (a *App) logDryRunFieldSets(cfg Config, project ProjectInfo, task Task, mil
 	return count
 }
 
-func (a *App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTasks, issueByTaskID map[string]Issue) (linked int, failed int) {
+func (a *App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTasks, issueByTaskID map[string]Issue, claimedIssues map[string]string) (linked int, failed int) {
 	warned := map[string]bool{}
 	for _, task := range resolved.Tasks {
 		id := CanonicalTaskID(task.ID)
@@ -840,6 +849,10 @@ func (a *App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTa
 			continue
 		}
 		if current.ID != "" {
+			if isManualInboxTriageClaim(current, claimedIssues) {
+				a.warnOnce(warned, "manual-inbox-triage-parent", "warning: refusing to change sub-issue parent %s#%d for %s#%d because the current parent needs manual inbox triage; skipping link", current.Repo, current.Number, child.Repo, child.Number)
+				continue
+			}
 			if !cfg.RepoAllowed(current.Repo) {
 				a.warnOnce(warned, "foreign-parent-"+current.Repo, "warning: refusing to remove foreign sub-issue parent %s#%d for %s#%d; skipping link", current.Repo, current.Number, child.Repo, child.Number)
 				continue

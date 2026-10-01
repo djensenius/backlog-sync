@@ -534,6 +534,9 @@ func TestInboxManualModeClaimsUnmarkedInboxBeforeAdoption(t *testing.T) {
 	if original.Title != inbox.Title || original.Body != inbox.Body || !hasLabelFold(original, "inbox") || len(gh.updatedIssues) != 0 {
 		t.Fatalf("unmarked inbox issue should receive zero issue writes, original=%+v updates=%d", original, len(gh.updatedIssues))
 	}
+	if gh.addProjectItemCalls != 0 {
+		t.Fatalf("unmarked inbox issue should not be added to the project, addProjectItemCalls=%d", gh.addProjectItemCalls)
+	}
 	created := gh.createdIssues[0]
 	if created.Number == inbox.Number || created.Title != IssueTitle(task) || !strings.HasPrefix(created.Body, MarkerFor(task.ID)+"\n") {
 		t.Fatalf("task should get one new mirrored issue instead of adopting inbox issue, created=%+v", created)
@@ -957,19 +960,19 @@ func TestSubIssueParentDiffAndExpectedRejectionWarnsOnce(t *testing.T) {
 	gh := basicGH(map[string][]Issue{"owner/repo": {parent, child}})
 	gh.parents["C"] = IssueParentInfo{ID: "P", Number: 1, Repo: "owner/repo"}
 	app := App{GitHub: gh, Logf: func(string, ...any) {}}
-	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues)
+	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, nil)
 	if links != 0 || failed != 0 || gh.addSubIssueCalls != 0 || gh.removeSubIssueCalls != 0 {
 		t.Fatalf("same parent should be no-op links=%d failed=%d add=%d remove=%d", links, failed, gh.addSubIssueCalls, gh.removeSubIssueCalls)
 	}
 	gh.parents["C"] = IssueParentInfo{ID: "OLD", Number: 9, Repo: "owner/repo"}
-	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues)
+	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues, nil)
 	if links != 1 || failed != 0 || gh.removeSubIssueCalls != 1 || gh.addSubIssueCalls != 1 {
 		t.Fatalf("different parent should remove then add links=%d failed=%d add=%d remove=%d", links, failed, gh.addSubIssueCalls, gh.removeSubIssueCalls)
 	}
 	gh = basicGH(map[string][]Issue{"owner/repo": {parent, child}})
 	gh.parents["C"] = IssueParentInfo{ID: "FOREIGN", Number: 99, Repo: "evil/repo"}
 	app = App{GitHub: gh, Logf: func(string, ...any) {}}
-	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues)
+	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues, nil)
 	if links != 0 || failed != 0 || gh.writeCalls() != 0 {
 		t.Fatalf("foreign parent should skip all writes links=%d failed=%d writes=%d", links, failed, gh.writeCalls())
 	}
@@ -981,7 +984,7 @@ func TestSubIssueParentDiffAndExpectedRejectionWarnsOnce(t *testing.T) {
 	gh.subIssueErr = errors.New("unsupported")
 	var logs []string
 	app = App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
-	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues)
+	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues, nil)
 	if links != 0 || failed != 0 || strings.Count(strings.Join(logs, "\n"), "sub-issue links are not supported") != 1 || gh.addSubIssueCalls != 2 {
 		t.Fatalf("expected unsupported sub-issue rejection to warn once without failing, links=%d failed=%d calls=%d logs=%v", links, failed, gh.addSubIssueCalls, logs)
 	}
@@ -990,9 +993,34 @@ func TestSubIssueParentDiffAndExpectedRejectionWarnsOnce(t *testing.T) {
 	gh.subIssueErr = errors.New("api exploded")
 	logs = nil
 	app = App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
-	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues)
+	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues, nil)
 	if links != 0 || failed != 2 || strings.Count(strings.Join(logs, "\n"), "add sub-issue") != 2 || !logContains(logs, "task-1.1") || !logContains(logs, "task-1.2") || gh.addSubIssueCalls != 2 {
 		t.Fatalf("expected unexpected sub-issue API errors to fail per task, links=%d failed=%d calls=%d logs=%v", links, failed, gh.addSubIssueCalls, logs)
+	}
+}
+
+func TestSubIssueSkipsCurrentManualInboxTriageParent(t *testing.T) {
+	ctx := context.Background()
+	root := tempRoot(t)
+	cfg := testConfig(root)
+	parent := Issue{Number: 1, DatabaseID: 1, NodeID: "P", Repo: "owner/repo"}
+	child := Issue{Number: 2, DatabaseID: 2, NodeID: "C", Repo: "owner/repo"}
+	child2 := Issue{Number: 3, DatabaseID: 3, NodeID: "C2", Repo: "owner/repo"}
+	inboxParent := Issue{Number: 90, DatabaseID: 90, NodeID: "I_90", Repo: "owner/repo", Labels: []IssueLabel{{Name: "inbox"}}}
+	resolved := ResolvedTasks{Tasks: []Task{{ID: "TASK-1"}, {ID: "TASK-1.1", ParentTaskID: sp("TASK-1")}, {ID: "TASK-1.2", ParentTaskID: sp("TASK-1")}}}
+	issues := map[string]Issue{"task-1": parent, "task-1.1": child, "task-1.2": child2}
+	gh := basicGH(map[string][]Issue{"owner/repo": {parent, child, child2, inboxParent}})
+	gh.parents["C"] = IssueParentInfo{ID: inboxParent.NodeID, Number: inboxParent.Number, Repo: inboxParent.Repo}
+	gh.parents["C2"] = IssueParentInfo{ID: inboxParent.NodeID, Number: inboxParent.Number, Repo: inboxParent.Repo}
+	var logs []string
+	app := App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	claims := map[string]string{issueClaimKey(inboxParent): manualInboxTriageClaim}
+	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, claims)
+	if links != 0 || failed != 0 || gh.addSubIssueCalls != 0 || gh.removeSubIssueCalls != 0 {
+		t.Fatalf("manual inbox triage parent should skip all sub-issue writes links=%d failed=%d add=%d remove=%d", links, failed, gh.addSubIssueCalls, gh.removeSubIssueCalls)
+	}
+	if strings.Count(strings.Join(logs, "\n"), "manual inbox triage") != 1 {
+		t.Fatalf("expected one manual inbox triage warning, logs=%v", logs)
 	}
 }
 
