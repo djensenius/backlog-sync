@@ -43,8 +43,8 @@ type InboxConfig struct {
 }
 
 const (
-	InboxModePush = "push"
-	InboxModePR   = "pr"
+	InboxModePush   = "push"
+	InboxModeManual = "manual"
 )
 
 type LabelConfig struct {
@@ -146,14 +146,6 @@ type IssueLabel struct {
 	Name string `json:"name"`
 }
 
-type PullRequest struct {
-	Number      int    `json:"number"`
-	URL         string `json:"url"`
-	Title       string `json:"title"`
-	Body        string `json:"body"`
-	HeadRefName string `json:"headRefName"`
-}
-
 type IssuePatch struct {
 	Title       *string
 	Body        *string
@@ -212,6 +204,7 @@ type Counters struct {
 	Updated       int
 	StatusChanges int
 	Imported      int
+	InboxTriage   int
 	ProjectAdded  int
 	FieldChanges  int
 	SubIssueLinks int

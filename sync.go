@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,11 +30,6 @@ func (a *App) Run(ctx context.Context, cfg Config) (Counters, error) {
 		return Counters{}, fmt.Errorf("read task prefix through backlog config: empty prefix")
 	}
 	cfg.TaskPrefix = strings.ToLower(strings.TrimSpace(prefix))
-	if cfg.Inbox.Enabled && !cfg.NoInbox && cfg.Inbox.Mode == InboxModePR && !cfg.DryRun {
-		if err := a.removeTemporaryInboxWorktrees(ctx, cfg); err != nil {
-			return Counters{}, err
-		}
-	}
 	resolved, err := CollectTasks(ctx, cfg, a.Git, a.Backlog, a.Logf)
 	if err != nil {
 		return Counters{}, err
@@ -76,11 +69,12 @@ func (a *App) Run(ctx context.Context, cfg Config) (Counters, error) {
 		a.Logf("error: %s %s failed: %v", CanonicalTaskID(taskID), operation, err)
 	}
 	if cfg.Inbox.Enabled && !cfg.NoInbox {
-		imported, linked, err := a.processInbox(ctx, cfg, allIssues, markerIssues, issueByTaskID, claimedIssues, resolved)
+		imported, triage, linked, err := a.processInbox(ctx, cfg, allIssues, markerIssues, issueByTaskID, claimedIssues, resolved)
 		if err != nil {
 			return counters, err
 		}
 		counters.Imported += imported
+		counters.InboxTriage += triage
 		for id, issue := range linked {
 			markerIssues[id] = issue
 			issueByTaskID[id] = issue
@@ -252,7 +246,7 @@ func (a *App) Run(ctx context.Context, cfg Config) (Counters, error) {
 		counters.SubIssueLinks += linked
 		counters.Failed += failed
 	}
-	a.Logf("sync complete: %d created, %d updated, %d status changes, %d imported, %d failed operations", counters.Created, counters.Updated, counters.StatusChanges, counters.Imported, counters.Failed)
+	a.Logf("sync complete: %d created, %d updated, %d status changes, %d imported, %d inbox issues need triage, %d failed operations", counters.Created, counters.Updated, counters.StatusChanges, counters.Imported, counters.InboxTriage, counters.Failed)
 	if counters.Failed > 0 {
 		return counters, fmt.Errorf("%d task sync operation(s) failed", counters.Failed)
 	}
@@ -448,34 +442,25 @@ func DiffIssue(task Task, issue Issue, body string, labels []string) (IssuePatch
 	return patch, fields
 }
 
-func (a *App) removeTemporaryInboxWorktrees(ctx context.Context, cfg Config) error {
-	worktrees, err := a.Git.Worktrees(ctx, cfg.Root)
-	if err != nil {
-		return err
-	}
-	for _, wt := range worktrees {
-		if wt.Path == "" || !isTempInboxWorktreePath(wt.Path) {
-			continue
-		}
-		a.Logf("remove leftover inbox temporary worktree %s", wt.Path)
-		if err := a.Git.RemoveWorktree(ctx, cfg.Root, wt.Path); err != nil {
-			return err
-		}
-	}
-	return a.Git.PruneWorktrees(ctx, cfg.Root)
-}
-
-func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, markerIssues map[string]Issue, issueByTaskID map[string]Issue, claimedIssues map[string]string, resolved ResolvedTasks) (imported int, linked map[string]Issue, err error) {
-	clean, reason := true, ""
-	if cfg.Inbox.Mode == InboxModePush {
-		clean, reason, err = a.Git.RootBranchClean(ctx, cfg.Root, cfg.MainBranch)
-		if err != nil {
-			return 0, nil, err
-		}
-	}
+func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, markerIssues map[string]Issue, issueByTaskID map[string]Issue, claimedIssues map[string]string, resolved ResolvedTasks) (imported int, triage int, linked map[string]Issue, err error) {
 	linked = map[string]Issue{}
+	if cfg.Inbox.Mode == InboxModeManual {
+		for _, issue := range issues {
+			if issue.State != "open" || !hasLabelFold(issue, cfg.Inbox.Label) {
+				continue
+			}
+			a.Logf("inbox issue %s#%d needs triage: %s", issue.Repo, issue.Number, issue.Title)
+			triage++
+		}
+		return 0, triage, linked, nil
+	}
+
+	clean, reason, err := a.Git.RootBranchClean(ctx, cfg.Root, cfg.MainBranch)
+	if err != nil {
+		return 0, 0, nil, err
+	}
 	defer func() {
-		if cfg.Inbox.Mode == InboxModePush && imported > 0 && cfg.Inbox.Push && !cfg.DryRun {
+		if imported > 0 && cfg.Inbox.Push && !cfg.DryRun {
 			if pushErr := a.Backlog.Push(ctx, cfg.Root, cfg.MainBranch); pushErr != nil {
 				a.Logf("warning: push %s failed after inbox import: %v", cfg.MainBranch, pushErr)
 			}
@@ -493,7 +478,7 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 			if !cfg.DryRun {
 				updated, err = a.GitHub.UpdateIssue(ctx, issue.Repo, issue.Number, patch)
 				if err != nil {
-					return imported, linked, err
+					return imported, triage, linked, err
 				}
 			}
 			updated.Repo = issue.Repo
@@ -519,43 +504,31 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 			if existing, ok := markerIssues[canonicalTaskID]; ok && !sameIssue(existing, issue) {
 				a.Logf("warning: refusing to mark inbox issue %s#%d for %s because %s already has %s#%d; removing only inbox label", issue.Repo, issue.Number, canonicalTaskID, canonicalTaskID, existing.Repo, existing.Number)
 				if err := a.stripInboxLabel(ctx, cfg, issue); err != nil {
-					return imported, linked, err
+					return imported, triage, linked, err
 				}
 				continue
 			}
 			if owner, claimed := claimedIssues[issueClaimKey(issue)]; claimed && owner != canonicalTaskID {
 				a.Logf("warning: refusing to mark inbox issue %s#%d for %s because it is already claimed by %s; removing only inbox label", issue.Repo, issue.Number, canonicalTaskID, owner)
 				if err := a.stripInboxLabel(ctx, cfg, issue); err != nil {
-					return imported, linked, err
+					return imported, triage, linked, err
 				}
 				continue
 			}
 		}
 		if taskID == "" {
-			switch cfg.Inbox.Mode {
-			case InboxModePR:
-				created, err := a.ensureInboxPullRequest(ctx, cfg, issue, issueURL)
+			description := strings.TrimSpace(issue.Body)
+			project := cfg.ProjectForRepo(issue.Repo)
+			if cfg.DryRun {
+				a.Logf("would create task from %s#%d", issue.Repo, issue.Number)
+				taskID = strings.ToUpper(cfg.TaskPrefix) + "-DRY-RUN"
+			} else {
+				id, err := a.Backlog.CreateTask(ctx, cfg.Root, CreateTaskInput{Title: issue.Title, Description: description, Labels: []string{}, Project: project, References: []string{issueURL}, TaskPrefix: cfg.TaskPrefix})
 				if err != nil {
-					return imported, linked, err
+					return imported, triage, linked, err
 				}
-				if created {
-					imported++
-				}
-				continue
-			case InboxModePush:
-				description := strings.TrimSpace(issue.Body)
-				project := cfg.ProjectForRepo(issue.Repo)
-				if cfg.DryRun {
-					a.Logf("would create task from %s#%d", issue.Repo, issue.Number)
-					taskID = strings.ToUpper(cfg.TaskPrefix) + "-DRY-RUN"
-				} else {
-					id, err := a.Backlog.CreateTask(ctx, cfg.Root, CreateTaskInput{Title: issue.Title, Description: description, Labels: []string{}, Project: project, References: []string{issueURL}, TaskPrefix: cfg.TaskPrefix})
-					if err != nil {
-						return imported, linked, err
-					}
-					taskID = id
-					imported++
-				}
+				taskID = id
+				imported++
 			}
 		} else {
 			a.Logf("reuse existing referenced task %s for issue %s#%d", CanonicalTaskID(taskID), issue.Repo, issue.Number)
@@ -569,7 +542,7 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 		patch := IssuePatch{Title: &title, Body: &body, Labels: &labels}
 		updated, err := a.GitHub.UpdateIssue(ctx, issue.Repo, issue.Number, patch)
 		if err != nil {
-			return imported, linked, err
+			return imported, triage, linked, err
 		}
 		updated.Repo = issue.Repo
 		linked[CanonicalTaskID(taskID)] = updated
@@ -579,175 +552,7 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 			claimedIssues[key] = CanonicalTaskID(taskID)
 		}
 	}
-	return imported, linked, nil
-}
-
-func (a *App) ensureInboxPullRequest(ctx context.Context, cfg Config, issue Issue, issueURL string) (created bool, err error) {
-	rootRepo, err := a.Git.RemoteRepo(ctx, cfg.Root, "origin")
-	if err != nil {
-		return false, err
-	}
-	if !cfg.RepoAllowed(rootRepo) {
-		return false, fmt.Errorf("root repo %s is not in configured repo allowlist", rootRepo)
-	}
-	branch := inboxBranchName(issue)
-	marker := inboxPRMarker(issue)
-	if !cfg.DryRun {
-		if err := a.Git.DeleteLocalBranch(ctx, cfg.Root, branch); err != nil {
-			return false, err
-		}
-	}
-	prs, err := a.GitHub.ListOpenPullRequests(ctx, rootRepo, branch, marker)
-	if err != nil {
-		return false, err
-	}
-	if pr, ok := findInboxPullRequest(prs, branch, marker); ok {
-		a.Logf("reuse existing inbox PR %s for issue %s#%d", pr.URL, issue.Repo, issue.Number)
-		return false, nil
-	}
-	if cfg.DryRun {
-		a.Logf("would create task from %s#%d on branch %s and open PR in %s", issue.Repo, issue.Number, branch, rootRepo)
-		return false, nil
-	}
-	remoteBranchExists, err := a.Git.RemoteBranchExists(ctx, cfg.Root, "origin", branch)
-	if err != nil {
-		return false, err
-	}
-	if remoteBranchExists {
-		if err := a.openInboxPullRequestFromExistingBranch(ctx, cfg, rootRepo, branch, issue, issueURL); err != nil {
-			return false, err
-		}
-		return false, nil
-	}
-	if err := a.Git.Fetch(ctx, cfg.Root, "origin", cfg.MainBranch); err != nil {
-		return false, err
-	}
-	taskID, err := a.withInboxWorktree(ctx, cfg.Root, "origin/"+cfg.MainBranch, func(tmp string) (string, error) {
-		description := strings.TrimSpace(issue.Body)
-		project := cfg.ProjectForRepo(issue.Repo)
-		taskID, err := a.Backlog.CreateTask(ctx, tmp, CreateTaskInput{Title: issue.Title, Description: description, Labels: []string{}, Project: project, References: []string{issueURL}, TaskPrefix: cfg.TaskPrefix})
-		if err != nil {
-			return "", err
-		}
-		dirty, err := a.Git.WorktreeHasChanges(ctx, tmp)
-		if err != nil {
-			return "", err
-		}
-		if dirty {
-			return "", fmt.Errorf("backlog task create left uncommitted changes in temporary worktree; enable Backlog autoCommit for inbox pr mode")
-		}
-		if err := a.Git.PushBranch(ctx, tmp, branch); err != nil {
-			return "", err
-		}
-		return taskID, nil
-	})
-	if err != nil {
-		return false, err
-	}
-	if err := a.Git.DeleteLocalBranch(ctx, cfg.Root, branch); err != nil {
-		return false, err
-	}
-	if err := a.createInboxPullRequest(ctx, cfg, rootRepo, branch, issue, issueURL, taskID); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func (a *App) openInboxPullRequestFromExistingBranch(ctx context.Context, cfg Config, rootRepo, branch string, issue Issue, issueURL string) error {
-	if err := a.Git.Fetch(ctx, cfg.Root, "origin", branch); err != nil {
-		return err
-	}
-	taskID, err := a.withInboxWorktree(ctx, cfg.Root, "origin/"+branch, func(tmp string) (string, error) {
-		return a.findTaskIDByReferenceInWorktree(ctx, tmp, issueURL)
-	})
-	if err != nil {
-		return err
-	}
-	if taskID == "" {
-		return fmt.Errorf("remote inbox branch %s exists but no Backlog task references %s", branch, issueURL)
-	}
-	if err := a.Git.DeleteLocalBranch(ctx, cfg.Root, branch); err != nil {
-		return err
-	}
-	return a.createInboxPullRequest(ctx, cfg, rootRepo, branch, issue, issueURL, taskID)
-}
-
-func (a *App) withInboxWorktree(ctx context.Context, root, startPoint string, fn func(tmp string) (string, error)) (result string, err error) {
-	tmpParent, err := os.MkdirTemp("", "backlog-sync-inbox-*")
-	if err != nil {
-		return "", err
-	}
-	tmp := filepath.Join(tmpParent, "worktree")
-	worktreeAdded := false
-	defer func() {
-		if worktreeAdded {
-			if removeErr := a.Git.RemoveWorktree(ctx, root, tmp); removeErr != nil && err == nil {
-				err = removeErr
-			}
-		}
-		if removeErr := os.RemoveAll(tmpParent); removeErr != nil && err == nil {
-			err = removeErr
-		}
-	}()
-	if err := a.Git.AddWorktree(ctx, root, tmp, startPoint); err != nil {
-		return "", err
-	}
-	worktreeAdded = true
-	return fn(tmp)
-}
-
-func (a *App) findTaskIDByReferenceInWorktree(ctx context.Context, dir, issueURL string) (string, error) {
-	summaries, err := listAllTasks(ctx, a.Backlog, dir)
-	if err != nil {
-		return "", err
-	}
-	for _, summary := range summaries {
-		view, err := a.Backlog.ViewTask(ctx, dir, summary.ID)
-		if err != nil {
-			return "", err
-		}
-		for _, ref := range view.Task.References {
-			if strings.EqualFold(ref, issueURL) {
-				return view.Task.ID, nil
-			}
-		}
-	}
-	return "", nil
-}
-
-func (a *App) createInboxPullRequest(ctx context.Context, cfg Config, rootRepo, branch string, issue Issue, issueURL, taskID string) error {
-	title := fmt.Sprintf("%s: %s", CanonicalTaskID(taskID), issue.Title)
-	body := inboxPRBody(issue, issueURL)
-	pr, err := a.GitHub.CreatePullRequest(ctx, rootRepo, branch, cfg.MainBranch, title, body)
-	if err != nil {
-		return err
-	}
-	a.Logf("created inbox PR %s for issue %s#%d", pr.URL, issue.Repo, issue.Number)
-	return nil
-}
-
-func inboxBranchName(issue Issue) string {
-	repo := strings.ToLower(issue.Repo)
-	replacer := strings.NewReplacer("/", "-", "_", "-", " ", "-")
-	repo = replacer.Replace(repo)
-	return fmt.Sprintf("inbox/%s-%d", repo, issue.Number)
-}
-
-func inboxPRMarker(issue Issue) string {
-	return fmt.Sprintf("<!-- backlog-sync:inbox %s#%d -->", strings.ToLower(issue.Repo), issue.Number)
-}
-
-func inboxPRBody(issue Issue, issueURL string) string {
-	return fmt.Sprintf("%s\n\nImports inbox issue %s.\n\nCreated by `tools/backlog-sync` in inbox `pr` mode.", inboxPRMarker(issue), issueURL)
-}
-
-func findInboxPullRequest(prs []PullRequest, branch, marker string) (PullRequest, bool) {
-	for _, pr := range prs {
-		if pr.HeadRefName == branch || strings.Contains(pr.Body, marker) {
-			return pr, true
-		}
-	}
-	return PullRequest{}, false
+	return imported, triage, linked, nil
 }
 
 func (a *App) stripInboxLabel(ctx context.Context, cfg Config, issue Issue) error {

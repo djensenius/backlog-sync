@@ -1,6 +1,6 @@
 # Backlog Sync
 
-`backlog-sync` mirrors local Backlog.md tasks to GitHub Issues and GitHub Project v2. Backlog.md remains the source of truth; GitHub edits are overwritten on the next sync except for the narrow `inbox` import path.
+`backlog-sync` mirrors local Backlog.md tasks to GitHub Issues and GitHub Project v2. Backlog.md remains the source of truth; GitHub edits are overwritten on the next sync except for the narrow `inbox` push import path.
 
 The binary is consumer-neutral. All repo/project choices come from a JSON config selected with `--config <path>` (default: `<root>/.backlog-sync.json`). Flags only override config fields for local testing.
 
@@ -54,7 +54,7 @@ Canadian Ham config committed at the repository root:
   "defaultRepo": "djensenius/canadian-ham",
   "mainBranch": "main",
   "statusMap": {},
-  "inbox": { "enabled": true, "label": "inbox", "mode": "pr" },
+  "inbox": { "enabled": true, "label": "inbox", "mode": "manual" },
   "adoptReferencedIssues": false,
   "labels": { "managed": ["*"], "addAlways": [] },
   "subIssues": true,
@@ -114,9 +114,9 @@ Open issues labelled with the configured inbox label are scanned in every config
 `inbox.mode` selects how new tasks are imported:
 
 - `push` preserves the direct-commit behavior used by repositories whose Backlog branch is allowed to take direct commits. Before creating a task, the root worktree must be on `mainBranch`, not mid-merge/rebase/cherry-pick, and have a clean worktree/index. The tool first checks whether any task already references the issue URL; if so, it reuses that task and only marks the issue. Otherwise it creates a task with `--ref <issue URL>`, `--project <reverse-mapped project>` when applicable, and the issue body as the description. It then immediately removes the inbox label, prepends the marker, and retitles the issue. After any inbox creation, `git -C <root> push origin <mainBranch>` runs when legacy `inbox.push` is true; push failures are logged without aborting.
-- `pr` is for pull-request-only repositories such as Canadian Ham. The tool never commits to or pushes `main`. It resolves the root repository from `origin`, refuses it unless that owner/name is in the configured repo allowlist, prunes stale git worktree registrations, deletes any stale local copy of the deterministic inbox branch, and searches open PRs by head branch plus the stable inbox marker. If the remote inbox branch already exists without an open PR (for example, a crash after pushing the branch but before `gh pr create`), the tool opens a PR from that branch instead of creating another task. Otherwise it fetches `origin/<mainBranch>`, creates a detached temporary `git worktree` under `os.TempDir()` from `origin/<mainBranch>`, creates the Backlog task there, verifies Backlog auto-committed it, pushes `HEAD:refs/heads/<branch>` with `--force-with-lease`, deletes any local branch copy, and opens a PR with `gh pr create --repo <owner/name>` titled `<task-id>: <issue title>`. The PR body includes a stable inbox marker and issue link. While the PR is open the original issue keeps the inbox label, so re-runs find the open PR and skip it. When the PR merges and the task is visible from the main worktree, the normal reference path prepends the Backlog marker, retitles the original issue, and removes the inbox label without creating a duplicate issue. If the PR is closed without merging and the issue still has the inbox label, the next run retries: it reopens a PR from the existing remote branch when present, or creates a new inbox branch when the branch was deleted.
+- `manual` is report-only for repositories where inbox issues must be triaged into normal task changes by a coordinator. It logs each open inbox-labelled issue as `inbox issue <repo>#<N> needs triage: <title>` and includes `<N> inbox issues need triage` in the sync summary. It never creates a Backlog task, edits labels or issue bodies, creates markers, creates branches, or pushes for those inbox issues.
 
-Existing tasks are never updated. `--dry-run` performs no GitHub, Backlog, or git writes and logs the planned PR branch/open operation for `pr` mode. In `pr` mode, Backlog.md `autoCommit` must be enabled for the temporary worktree; if `backlog task create` leaves uncommitted changes, the sync fails with a clear error instead of pushing an empty branch.
+Existing tasks are never updated. `--dry-run` performs no GitHub, Backlog, or git writes.
 
 ## Flags
 

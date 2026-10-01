@@ -169,8 +169,8 @@ func validateConfig(cfg Config) error {
 	if !strings.Contains(cfg.DefaultRepo, "/") {
 		return fmt.Errorf("defaultRepo must be owner/name")
 	}
-	if cfg.Inbox.Mode != InboxModePush && cfg.Inbox.Mode != InboxModePR {
-		return fmt.Errorf("inbox.mode must be %q or %q", InboxModePush, InboxModePR)
+	if cfg.Inbox.Mode != InboxModePush && cfg.Inbox.Mode != InboxModeManual {
+		return fmt.Errorf("inbox.mode must be %q or %q", InboxModePush, InboxModeManual)
 	}
 	for project, repo := range cfg.Repos {
 		if project == "" || !strings.Contains(repo, "/") {
