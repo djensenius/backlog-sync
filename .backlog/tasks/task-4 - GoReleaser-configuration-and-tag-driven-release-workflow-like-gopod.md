@@ -24,7 +24,7 @@ Users and other machines should install a tagged, checksummed binary instead of 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 .goreleaser.yaml (v2) builds darwin/amd64, darwin/arm64, linux/amd64 and linux/arm64 with CGO off, -trimpath, reproducible timestamps, tar.gz archives (README, LICENSE, launchd template, install script) and checksums.txt
-- [ ] #2 .github/workflows/release.yml publishes only semver tags that point to a commit on main, as a draft release (gopods validation and draft flow)
+- [ ] #2 .github/workflows/release.yml publishes only semver tags that point to a commit on main, as a draft release (gopod's validation and draft flow)
 - [ ] #3 mise run release:check and release:snapshot work locally
-- [ ] #4 A snapshot builds binary reports the injected version
+- [ ] #4 A snapshot build's binary reports the injected version
 <!-- AC:END -->
