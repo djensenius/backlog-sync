@@ -524,7 +524,12 @@ func TestDuplicateMarkersAbortOnCLIFailureAndPaginationMissingTotal(t *testing.T
 	if _, err := app.Run(context.Background(), testConfig(root)); err == nil || !strings.Contains(err.Error(), "task prefix") {
 		t.Fatalf("expected hard prefix error, got %v", err)
 	}
-	bl = newFakeBacklog(root, sampleTask())
+	fullPage := make([]Task, 100)
+	for i := range fullPage {
+		fullPage[i] = sampleTask()
+		fullPage[i].ID = fmt.Sprintf("TASK-%d", i+100)
+	}
+	bl = newFakeBacklog(root, fullPage...)
 	bl.missingTotal = true
 	if _, err := listAllTasks(context.Background(), bl, root); err == nil || !strings.Contains(err.Error(), "missing total") {
 		t.Fatalf("expected missing total error, got %v", err)

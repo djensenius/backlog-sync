@@ -119,7 +119,10 @@ func listAllTasks(ctx context.Context, backlog Backlog, dir string) ([]TaskSumma
 		}
 		out = append(out, page.Tasks...)
 		if page.Total == nil {
-			return nil, fmt.Errorf("pagination response missing total")
+			if page.NextSkip != nil || len(page.Tasks) == pageSize {
+				return nil, fmt.Errorf("pagination response missing total")
+			}
+			break
 		}
 		if page.NextSkip == nil {
 			if len(out) != *page.Total {
