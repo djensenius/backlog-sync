@@ -1,7 +1,5 @@
 # Backlog Sync
 
-> Extracted from [djensenius/canadian-ham](https://github.com/djensenius/canadian-ham) (`tools/backlog-sync`) with its history. The examples below still use canadian-ham and ArkhamHorror paths; a generic README is planned.
-
 `backlog-sync` mirrors local Backlog.md tasks to GitHub Issues and GitHub Project v2. Backlog.md remains the source of truth; GitHub edits are overwritten on the next sync except for the narrow `inbox` push import path.
 
 The binary is consumer-neutral. All repo/project choices come from a JSON config selected with `--config <path>` (default: `<root>/.backlog-sync.json`). Flags only override config fields for local testing.
@@ -10,61 +8,26 @@ The binary is consumer-neutral. All repo/project choices come from a JSON config
 
 ## Configuration
 
-```jsonc
-{
-  "root": "/abs/path/to/backlog/repo",          // optional; default = git toplevel of cwd / --root
-  "projectOwner": "djensenius",                  // user or org login
-  "projectOwnerType": "user",                    // "user" | "org"
-  "projectNumber": 9,
-  "repos": {                                     // Backlog task project -> issue repo
-    "fork": "djensenius/ArkhamHorror",
-    "apple": "djensenius/ArkhamHorror-Apple",
-    "linux": "djensenius/ArkhamHorror-Linux",
-    "meta": "djensenius/ArkhamHorror-Project"
-  },
-  "defaultRepo": "djensenius/ArkhamHorror-Project",
-  "mainBranch": "main",
-  "statusMap": {},
-  "inbox": { "enabled": true, "label": "inbox", "mode": "push", "push": true },
-  "adoptReferencedIssues": false,
-  "labels": {
-    "managed": ["backlog", "type:*", "area:*", "priority:*", "upstream-candidate", "roadmap", "owner"],
-    "addAlways": ["backlog"],
-    "priorityPrefix": "priority:"
-  },
-  "fields": {
-    "priority": "Priority",
-    "milestone": "Backlog milestone",
-    "area": "Area",
-    "taskId": "Task ID",
-    "branch": "Branch"
-  },
-  "subIssues": true,
-  "lockFile": "/Users/david/Library/Caches/example.lock",
-  "timeoutSeconds": 60
-}
-```
+Start by copying one of the committed pure-JSON examples:
 
-Canadian Ham config committed at the repository root:
+- [examples/minimal-single-repo.json](examples/minimal-single-repo.json) mirrors all tasks to one issue repository.
+- [examples/multi-repo.json](examples/multi-repo.json) routes Backlog task `project` values to different issue repositories through `repos`.
 
-```jsonc
-{
-  "projectOwner": "djensenius",
-  "projectOwnerType": "user",
-  "projectNumber": 8,
-  "repos": {},
-  "defaultRepo": "djensenius/canadian-ham",
-  "mainBranch": "main",
-  "statusMap": {},
-  "inbox": { "enabled": true, "label": "inbox", "mode": "manual" },
-  "adoptReferencedIssues": false,
-  "labels": { "managed": ["*"], "addAlways": [] },
-  "subIssues": true,
-  "timeoutSeconds": 60
-}
-```
+Both examples omit `root`, so the command uses the git top-level of the current directory or the path passed with `--root`. Keep `root` and `lockFile` out of committed consumer configs unless an absolute path is intentionally private to that consumer.
 
-`labels.managed: ["*"]` means every Backlog task label is eligible to be added to its mirrored issue. It still does not remove arbitrary existing issue labels, and the configured inbox label is never part of the mirror label set.
+Config fields:
+
+- `projectOwner`, `projectOwnerType`, and `projectNumber` select the GitHub Project v2 to update.
+- `repos` maps Backlog task `project` values to `owner/name` issue repositories; empty or unknown projects use `defaultRepo`.
+- `mainBranch` identifies the main worktree branch for deterministic task ownership and branch metadata.
+- `statusMap` optionally maps Backlog status names to GitHub Project Status option names; omitted entries use identity mapping.
+- `inbox` controls import/reporting for open issues carrying the configured inbox label. Use `mode: "manual"` for report-only triage and `mode: "push"` only when direct commits to the Backlog branch are allowed.
+- `adoptReferencedIssues` lets unmirrored tasks claim an existing referenced issue in the task's target repo.
+- `labels.managed` limits which Backlog labels the mirror may add or remove; `labels.managed: ["*"]` allows every Backlog task label. The configured inbox label is never part of the mirror label set.
+- `labels.addAlways` adds labels that are also covered by `labels.managed`; `labels.priorityPrefix` controls generated priority labels.
+- `fields` names optional GitHub Project fields to update when they exist.
+- `subIssues` enables parent/child issue links for Backlog subtasks.
+- `timeoutSeconds` sets the subprocess timeout; the default is 60 seconds.
 
 ## Cross-worktree Backlog reads
 
@@ -161,57 +124,16 @@ backlog-sync --config /path/to/repo/.backlog-sync.json --dry-run
 
 From a checkout: `go test ./... && go vet ./... && go build -o ~/bin/backlog-sync .`.
 
-ArkhamHorror uses the same binary with a temporary or private config, for example:
-
-```jsonc
-{
-  "root": "/Users/david/Developer/ArkhamHorror",
-  "projectOwner": "djensenius",
-  "projectOwnerType": "user",
-  "projectNumber": 9,
-  "repos": {
-    "fork": "djensenius/ArkhamHorror",
-    "apple": "djensenius/ArkhamHorror-Apple",
-    "linux": "djensenius/ArkhamHorror-Linux",
-    "meta": "djensenius/ArkhamHorror-Project"
-  },
-  "defaultRepo": "djensenius/ArkhamHorror-Project",
-  "mainBranch": "main",
-  "inbox": { "enabled": true, "label": "inbox", "mode": "push", "push": true },
-  "adoptReferencedIssues": true,
-  "labels": {
-    "managed": ["backlog", "type:*", "area:*", "priority:*", "upstream-candidate", "roadmap", "owner"],
-    "addAlways": ["backlog"],
-    "priorityPrefix": "priority:"
-  },
-  "fields": {
-    "priority": "Priority",
-    "milestone": "Backlog milestone",
-    "area": "Area",
-    "taskId": "Task ID",
-    "branch": "Branch"
-  },
-  "subIssues": true,
-  "timeoutSeconds": 60
-}
-```
-
 ## launchd install
 
 Use `install-launchd.sh` to render one LaunchAgent plist per config. It does not call `launchctl` unless `--load` is passed.
 
 ```bash
 ./install-launchd.sh \
-  --config /Users/david/Developer/canadian-ham/.backlog-sync.json \
-  --label com.djensenius.canadian-ham.backlog-sync \
-  --log /Users/david/Library/Logs/canadian-ham-backlog-sync.log \
-  --binary /Users/david/bin/backlog-sync
-
-./install-launchd.sh \
-  --config /Users/david/Developer/ArkhamHorror/.backlog-sync.json \
-  --label com.djensenius.arkham-backlog-sync \
-  --log /Users/david/Library/Logs/arkham-backlog-sync.log \
-  --binary /Users/david/bin/backlog-sync
+  --config /path/to/repo/.backlog-sync.json \
+  --label com.example.backlog-sync \
+  --log /path/to/logs/backlog-sync.log \
+  --binary /path/to/bin/backlog-sync
 ```
 
 Release archives also include `launchd/backlog-sync.plist.template` with placeholders for the rendered LaunchAgent fields.
@@ -221,7 +143,7 @@ Each config gets a distinct default lock path derived from the config path hash 
 Stop/unload a loaded job with:
 
 ```bash
-launchctl bootout gui/$(id -u)/com.djensenius.canadian-ham.backlog-sync
+launchctl bootout gui/$(id -u)/com.example.backlog-sync
 ```
 
 The plist appends stdout and stderr to the same log file. Configure log rotation if the job is left running long-term.

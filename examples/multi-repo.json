@@ -1,0 +1,33 @@
+{
+  "projectOwner": "PROJECT_OWNER_LOGIN",
+  "projectOwnerType": "org",
+  "projectNumber": 1,
+  "repos": {
+    "PROJECT_A": "PROJECT_OWNER_LOGIN/PROJECT_A_REPOSITORY",
+    "PROJECT_B": "PROJECT_OWNER_LOGIN/PROJECT_B_REPOSITORY",
+    "PROJECT_DOCS": "PROJECT_OWNER_LOGIN/PROJECT_DOCS_REPOSITORY"
+  },
+  "defaultRepo": "PROJECT_OWNER_LOGIN/DEFAULT_REPOSITORY",
+  "mainBranch": "main",
+  "statusMap": {},
+  "inbox": {
+    "enabled": true,
+    "label": "inbox",
+    "mode": "manual"
+  },
+  "adoptReferencedIssues": false,
+  "labels": {
+    "managed": ["backlog", "type:*", "area:*", "priority:*"],
+    "addAlways": ["backlog"],
+    "priorityPrefix": "priority:"
+  },
+  "fields": {
+    "priority": "Priority",
+    "milestone": "Backlog milestone",
+    "area": "Area",
+    "taskId": "Task ID",
+    "branch": "Branch"
+  },
+  "subIssues": true,
+  "timeoutSeconds": 60
+}
