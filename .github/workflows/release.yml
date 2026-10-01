@@ -29,14 +29,17 @@ jobs:
           fi
 
           git fetch --force --prune origin +refs/heads/main:refs/remotes/origin/main
-          tag_commit="$(git rev-list -n 1 "${tag}^{commit}")"
+          tag_commit="$(git rev-list -n 1 "refs/tags/${tag}^{commit}")"
           if ! git merge-base --is-ancestor "$tag_commit" origin/main; then
             echo "tag $tag ($tag_commit) must point to a commit on main" >&2
             exit 1
           fi
       - name: Install mise tools
         uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db
+        with:
+          cache: false
       - name: Publish draft release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
         run: goreleaser release --clean

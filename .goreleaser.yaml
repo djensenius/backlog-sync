@@ -77,3 +77,4 @@ release:
     owner: djensenius
     name: backlog-sync
   draft: true
+  replace_existing_draft: true
