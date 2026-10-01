@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@david'
 created_date: '2026-10-01 15:18'
-updated_date: '2026-10-01 17:42'
+updated_date: '2026-10-01 17:44'
 labels:
   - ci
   - release
@@ -74,6 +74,18 @@ Coordinator final validation after reviewer follow-ups:
 - `dist/checksums.txt` has 4 entries, one per archive; darwin arm64 archive contains `backlog-sync`, `README.md`, `LICENSE`, `install-launchd.sh`, and `launchd/com.djensenius.canadian-ham.backlog-sync.plist` with root/root ownership and commit-time mtimes.
 - `mise run ci` passed; `go test ./...` passed with `ok   github.com/djensenius/backlog-sync 0.200s`; `go vet ./...` passed with no output; `actionlint .github/workflows/release.yml` passed with no findings.
 - Independent reviewer returned APPROVE WITH NOTES after follow-up fixes; remaining notes were non-blocking hardening/follow-ups.
+
+PR #3 Copilot follow-up addressed in commit 225b2622bc7633007e65c5f0a29ec0974c975555: .goreleaser.yaml now archives launchd/backlog-sync.plist.template instead of launchd/*.plist, the generic template was added, and README install text now points users to GitHub release archives, checksum verification, extraction, --version, dry-run, and notes Homebrew remains planned.
+
+Follow-up validation from the task worktree:
+- `mise run release:check`: `1 configuration file(s) validated`; finished in 37.8ms.
+- `mise run release:snapshot`: built snapshot version `0.0.0-snapshot-225b262` for darwin_amd64_v1, darwin_arm64_v8.0, linux_arm64_v8.0, and linux_amd64_v1; archived four tarballs; `release succeeded after 1s`.
+- Archive contents check on `dist/backlog-sync_0.0.0-snapshot-225b262_darwin_arm64.tar.gz`: contains `backlog-sync`, `install-launchd.sh`, `launchd/backlog-sync.plist.template`, `LICENSE`, and `README.md`; `generic template present`; `consumer plist absent`.
+- Snapshot binary: `./dist/backlog-sync_darwin_arm64_v8.0/backlog-sync --version` -> `backlog-sync version=0.0.0-snapshot-225b262 commit=225b2622bc7633007e65c5f0a29ec0974c975555 date=2026-10-01T17:44:00Z`.
+- `mise run ci`: fmt, module, vet, test, build, and lint tasks passed; `go test` line was `ok  	github.com/djensenius/backlog-sync	0.177s`; finished in 524.6ms.
+- `go test ./...`: `ok  	github.com/djensenius/backlog-sync	0.186s`.
+- `go vet ./...`: passed with no output.
+- `actionlint .github/workflows/release.yml`: passed with only the mise go directive deprecation warning.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
