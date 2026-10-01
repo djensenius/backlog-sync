@@ -1,9 +1,11 @@
 ---
 id: TASK-2
 title: 'CI workflow with mise tasks, like gopod'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@david'
 created_date: '2026-10-01 15:18'
+updated_date: '2026-10-01 17:02'
 labels:
   - ci
 milestone: m-0
