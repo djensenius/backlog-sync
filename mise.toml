@@ -1,0 +1,39 @@
+[tools]
+go = "1.27.1"
+actionlint = "1.7.12"
+goreleaser = "2.18.2"
+shellcheck = "0.11.0"
+
+[tasks."fmt:check"]
+description = "Check Go formatting"
+run = '''
+files=$(gofmt -l .)
+if [ -n "$files" ]; then
+  printf '%s\n' "$files"
+  exit 1
+fi
+'''
+
+[tasks."module:check"]
+description = "Check Go module metadata"
+run = "go mod tidy -diff"
+
+[tasks.vet]
+description = "Run go vet"
+run = "go vet ./..."
+
+[tasks.test]
+description = "Run Go tests"
+run = "go test ./..."
+
+[tasks.build]
+description = "Build packages"
+run = "go build ./..."
+
+[tasks.lint]
+description = "Run workflow and shell linters"
+run = "actionlint && shellcheck install-launchd.sh"
+
+[tasks.ci]
+description = "Run all CI checks"
+depends = ["fmt:check", "module:check", "vet", "test", "build", "lint"]
