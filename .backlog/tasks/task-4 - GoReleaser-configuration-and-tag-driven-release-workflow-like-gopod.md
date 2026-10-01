@@ -1,10 +1,11 @@
 ---
 id: TASK-4
 title: 'GoReleaser configuration and tag-driven release workflow, like gopod'
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@david'
 created_date: '2026-10-01 15:18'
-updated_date: '2026-10-01 16:44'
+updated_date: '2026-10-01 17:50'
 labels:
   - ci
   - release
@@ -23,8 +24,90 @@ Users and other machines should install a tagged, checksummed binary instead of 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 `.goreleaser.yaml` (v2) builds `darwin/amd64`, `darwin/arm64`, `linux/amd64` and `linux/arm64` with `CGO` off, `-trimpath`, reproducible timestamps, `tar.gz` archives (`README`, `LICENSE`, launchd template, install script) and `checksums.txt`
-- [ ] #2 `.github/workflows/release.yml` publishes only semver tags that point to a commit on `main`, as a draft release (gopod's validation and draft flow)
-- [ ] #3 `mise run release:check` and `mise run release:snapshot` work locally
-- [ ] #4 A snapshot build's binary reports the injected version
+- [x] #1 `.goreleaser.yaml` (v2) builds `darwin/amd64`, `darwin/arm64`, `linux/amd64` and `linux/arm64` with `CGO` off, `-trimpath`, reproducible timestamps, `tar.gz` archives (`README`, `LICENSE`, launchd template, install script) and `checksums.txt`
+- [x] #2 `.github/workflows/release.yml` publishes only semver tags that point to a commit on `main`, as a draft release (gopod's validation and draft flow)
+- [x] #3 `mise run release:check` and `mise run release:snapshot` work locally
+- [x] #4 A snapshot build's binary reports the injected version
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Add a GoReleaser v2 configuration that builds the four required darwin/linux amd64/arm64 targets with CGO disabled, trimpath/metadata ldflags, reproducible archives, bundled README/LICENSE/launchd/install assets, and checksums.
+2. Extend mise.toml with release:check and release:snapshot tasks that validate the GoReleaser config and produce a local snapshot build.
+3. Add a pinned release workflow that runs only for tag pushes, validates the tag as semver, verifies the tagged commit is contained in origin/main, and publishes a draft GoReleaser release.
+4. Verify locally with mise run release:check, mise run release:snapshot, snapshot binary --version output, mise run ci/go test/go vet, and actionlint.
+
+PR #3 follow-up: replace the archived consumer launchd plist with a reusable launchd plist template, update README release install/verification text, then rerun release and CI validation.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implemented release workflow/config in commit ef72efac00bad6520ad4be8945369dfc3eef8363.
+
+Check evidence from the task worktree:
+- `mise run release:check`: `[release:check]   • 1 configuration file(s) validated`; `[release:check] Finished in 38.5ms`.
+- `mise run release:snapshot`: built `darwin_amd64_v1`, `darwin_arm64_v8.0`, `linux_arm64_v8.0`, and `linux_amd64_v1`; archived `backlog-sync_0.0.0-snapshot-ef72efa_{darwin_amd64,darwin_arm64,linux_amd64,linux_arm64}.tar.gz`; `release succeeded after 1s`.
+- Snapshot binary: `backlog-sync version=0.0.0-snapshot-ef72efa commit=ef72efac00bad6520ad4be8945369dfc3eef8363 date=2026-10-01T17:30:17Z`.
+- Archive/checksum spot check: `dist/checksums.txt` contains all four tar.gz archives; the darwin/arm64 tarball contains `backlog-sync`, `README.md`, `LICENSE`, `install-launchd.sh`, and `launchd/com.djensenius.canadian-ham.backlog-sync.plist`; tar metadata showed root/root ownership and commit-time mtimes.
+- `mise run ci`: `[test] ok  	github.com/djensenius/backlog-sync	0.171s`; `Finished in 514.4ms`.
+- `go test ./...`: `ok  	github.com/djensenius/backlog-sync	0.170s`.
+- `go vet ./...`: passed with no output.
+- `actionlint .github/workflows/release.yml`: passed with no output.
+
+Reviewer follow-up implemented in commit 83053c5d1ffc777ee618ebca81fc07e45008e785: release workflow now resolves tag commits as refs/tags/${tag}^{commit}, passes GORELEASER_CURRENT_TAG=${{ github.ref_name }} to GoReleaser, disables mise-action caching, and GoReleaser release config sets replace_existing_draft: true.
+
+Follow-up validation from the task worktree:
+- `actionlint .github/workflows/release.yml`: passed; output only the mise deprecation warning about go.mod go directive.
+- `mise run release:check`: `[release:check]   • 1 configuration file(s) validated`; `[release:check] Finished in 42.0ms`.
+- `mise run release:snapshot`: built snapshot version `0.0.0-snapshot-83053c5` for `linux_arm64_v8.0`, `linux_amd64_v1`, `darwin_amd64_v1`, and `darwin_arm64_v8.0`; archived all four tarballs; `release succeeded after 1s`.
+- Snapshot binary: `dist/backlog-sync_darwin_arm64_v8.0/backlog-sync --version` -> `backlog-sync version=0.0.0-snapshot-83053c5 commit=83053c5d1ffc777ee618ebca81fc07e45008e785 date=2026-10-01T17:35:06Z`.
+- `mise run ci`: `[test] ok  	github.com/djensenius/backlog-sync	0.224s`; `Finished in 556.3ms`.
+- `go test ./...`: `ok  	github.com/djensenius/backlog-sync	(cached)`.
+- `go vet ./...`: passed with no output.
+
+Coordinator final validation after reviewer follow-ups:
+- `mise run release:check` passed with `1 configuration file(s) validated` and finished in 80.2ms.
+- `mise run release:snapshot` passed, built darwin_amd64_v1, darwin_arm64_v8.0, linux_amd64_v1, and linux_arm64_v8.0, archived four tar.gz artifacts, calculated checksums, and reported `release succeeded after 1s`; snapshot version was `0.0.0-snapshot-5558e40`.
+- Snapshot binary `./dist/backlog-sync_darwin_arm64_v8.0/backlog-sync --version` printed `backlog-sync version=0.0.0-snapshot-5558e40 commit=5558e40dc5886281c55b86fc1ef34fde2a2ff25e date=2026-10-01T17:35:40Z`.
+- `dist/checksums.txt` has 4 entries, one per archive; darwin arm64 archive contains `backlog-sync`, `README.md`, `LICENSE`, `install-launchd.sh`, and `launchd/com.djensenius.canadian-ham.backlog-sync.plist` with root/root ownership and commit-time mtimes.
+- `mise run ci` passed; `go test ./...` passed with `ok   github.com/djensenius/backlog-sync 0.200s`; `go vet ./...` passed with no output; `actionlint .github/workflows/release.yml` passed with no findings.
+- Independent reviewer returned APPROVE WITH NOTES after follow-up fixes; remaining notes were non-blocking hardening/follow-ups.
+
+PR #3 Copilot follow-up addressed in commit 225b2622bc7633007e65c5f0a29ec0974c975555: .goreleaser.yaml now archives launchd/backlog-sync.plist.template instead of launchd/*.plist, the generic template was added, and README install text now points users to GitHub release archives, checksum verification, extraction, --version, dry-run, and notes Homebrew remains planned.
+
+Follow-up validation from the task worktree:
+- `mise run release:check`: `1 configuration file(s) validated`; finished in 37.8ms.
+- `mise run release:snapshot`: built snapshot version `0.0.0-snapshot-225b262` for darwin_amd64_v1, darwin_arm64_v8.0, linux_arm64_v8.0, and linux_amd64_v1; archived four tarballs; `release succeeded after 1s`.
+- Archive contents check on `dist/backlog-sync_0.0.0-snapshot-225b262_darwin_arm64.tar.gz`: contains `backlog-sync`, `install-launchd.sh`, `launchd/backlog-sync.plist.template`, `LICENSE`, and `README.md`; `generic template present`; `consumer plist absent`.
+- Snapshot binary: `./dist/backlog-sync_darwin_arm64_v8.0/backlog-sync --version` -> `backlog-sync version=0.0.0-snapshot-225b262 commit=225b2622bc7633007e65c5f0a29ec0974c975555 date=2026-10-01T17:44:00Z`.
+- `mise run ci`: fmt, module, vet, test, build, and lint tasks passed; `go test` line was `ok  	github.com/djensenius/backlog-sync	0.177s`; finished in 524.6ms.
+- `go test ./...`: `ok  	github.com/djensenius/backlog-sync	0.186s`.
+- `go vet ./...`: passed with no output.
+- `actionlint .github/workflows/release.yml`: passed with only the mise go directive deprecation warning.
+
+Additional PR #3 cleanup in commit 5001ffa3048cc5fd4bd53a3afba50170545fd096 removed the obsolete consumer-specific `launchd/com.djensenius.canadian-ham.backlog-sync.plist`, leaving only the reusable launchd template under `launchd/`.
+
+Final validation after the cleanup commit:
+- `mise run release:check`: `1 configuration file(s) validated`; finished in 40.6ms.
+- `mise run release:snapshot`: built snapshot version `0.0.0-snapshot-5001ffa` for darwin_amd64_v1, linux_amd64_v1, darwin_arm64_v8.0, and linux_arm64_v8.0; archived four tarballs; `release succeeded after 0s`.
+- Archive contents check on `dist/backlog-sync_0.0.0-snapshot-5001ffa_darwin_arm64.tar.gz`: contains `backlog-sync`, `install-launchd.sh`, `launchd/backlog-sync.plist.template`, `LICENSE`, and `README.md`; `generic template present`; `consumer plist absent`.
+- Snapshot binary: `./dist/backlog-sync_darwin_arm64_v8.0/backlog-sync --version` -> `backlog-sync version=0.0.0-snapshot-5001ffa commit=5001ffa3048cc5fd4bd53a3afba50170545fd096 date=2026-10-01T17:44:58Z`.
+- `mise run ci`: fmt, module, vet, test, build, and lint tasks passed; `go test` line was `ok  	github.com/djensenius/backlog-sync	0.180s`; finished in 512.0ms.
+- `go test ./...`: `ok  	github.com/djensenius/backlog-sync	0.192s`.
+- `go vet ./...`: passed with no output.
+- `actionlint .github/workflows/release.yml`: passed with only the mise go directive deprecation warning.
+
+Final PR #3 clarity cleanup: README install docs now say tagged versions create draft GitHub releases, release archives are downloadable after draft publication, and Linux users can verify checksums with sha256sum -c. The consumer-specific launchd plist was replaced with the generic launchd/backlog-sync.plist.template in the release archive docs. Validation passed: mise run release:check; mise run ci; go test ./...; go vet ./...; actionlint .github/workflows/release.yml.
+
+Final reviewer pass after README clarity cleanup returned APPROVE WITH NOTES with no blocking findings. Notes were README usability suggestions only: extraction into a scratch directory/top-level archive folder and a clearer OS/arch asset hint. TASK-4 acceptance remains met; Copilot findings were addressed by replacing the consumer plist with `launchd/backlog-sync.plist.template` and updating release archive documentation.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added GoReleaser v2 config, local release check/snapshot tasks, and a pinned draft-release workflow. Replaced the consumer launchd plist with the generic launchd/backlog-sync.plist.template and updated README install docs for published draft releases, checksum verification, extraction, --version, and dry-run. Verified with release checks, CI, go test, go vet, actionlint, snapshot archives/checksums/assets, and injected snapshot version output.
+
+PR #3 follow-up replaced the consumer-specific launchd plist with a reusable template and clarified release archive download/verification docs.
+<!-- SECTION:FINAL_SUMMARY:END -->

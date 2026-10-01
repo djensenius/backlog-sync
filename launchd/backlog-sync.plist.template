@@ -3,29 +3,29 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.djensenius.canadian-ham.backlog-sync</string>
+  <string>__LABEL__</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/david/bin/backlog-sync</string>
+    <string>__BINARY_PATH__</string>
     <string>--config</string>
-    <string>/Users/david/Developer/canadian-ham/.backlog-sync.json</string>
+    <string>__CONFIG_PATH__</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Users/david/Developer/canadian-ham</string>
+  <string>__WORKING_DIRECTORY__</string>
   <key>StartInterval</key>
   <integer>300</integer>
   <key>RunAtLoad</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>/Users/david/Library/Logs/canadian-ham-backlog-sync.log</string>
+  <string>__LOG_PATH__</string>
   <key>StandardErrorPath</key>
-  <string>/Users/david/Library/Logs/canadian-ham-backlog-sync.log</string>
+  <string>__LOG_PATH__</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>__PATH__</string>
     <key>HOME</key>
-    <string>/Users/david</string>
+    <string>__HOME__</string>
   </dict>
 </dict>
 </plist>

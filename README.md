@@ -137,16 +137,29 @@ Existing tasks are never updated. `--dry-run` performs no GitHub, Backlog, or gi
 
 All log lines are written to stdout with an RFC3339 timestamp prefix. Flag errors and runtime errors exit non-zero with the same timestamped format. Each subprocess has a configurable timeout (`timeoutSeconds`, default 60 seconds).
 
-## Build and dry run
+## Install, build, and dry run
 
-Requires Go 1.27 or newer and the standard library only.
+Tagged versions create draft GitHub releases. After a draft is published, download the archive for your OS/architecture from the [GitHub Releases page](https://github.com/djensenius/backlog-sync/releases) plus `checksums.txt`, verify the archive checksum, then extract the binary:
+
+```bash
+version=v0.1.0
+asset="backlog-sync_${version#v}_darwin_arm64.tar.gz"
+gh release download "$version" --repo djensenius/backlog-sync --pattern "$asset" --pattern checksums.txt
+grep "  ${asset}$" checksums.txt | shasum -a 256 -c -
+# Linux: grep "  ${asset}$" checksums.txt | sha256sum -c -
+tar -xzf "$asset"
+./backlog-sync --version
+./backlog-sync --config /path/to/repo/.backlog-sync.json --dry-run
+```
+
+Homebrew installation is planned. To build from source instead, use Go 1.27 or newer and the standard library only:
 
 ```bash
 go install github.com/djensenius/backlog-sync@latest   # or: git clone, then go build -o ~/bin/backlog-sync .
 backlog-sync --config /path/to/repo/.backlog-sync.json --dry-run
 ```
 
-From a checkout: `go test ./... && go vet ./... && go build -o ~/bin/backlog-sync .`. Release archives and a Homebrew formula are planned (see `.backlog/`).
+From a checkout: `go test ./... && go vet ./... && go build -o ~/bin/backlog-sync .`.
 
 ArkhamHorror uses the same binary with a temporary or private config, for example:
 
@@ -188,18 +201,20 @@ ArkhamHorror uses the same binary with a temporary or private config, for exampl
 Use `install-launchd.sh` to render one LaunchAgent plist per config. It does not call `launchctl` unless `--load` is passed.
 
 ```bash
-tools/backlog-sync/install-launchd.sh \
+./install-launchd.sh \
   --config /Users/david/Developer/canadian-ham/.backlog-sync.json \
   --label com.djensenius.canadian-ham.backlog-sync \
   --log /Users/david/Library/Logs/canadian-ham-backlog-sync.log \
   --binary /Users/david/bin/backlog-sync
 
-tools/backlog-sync/install-launchd.sh \
+./install-launchd.sh \
   --config /Users/david/Developer/ArkhamHorror/.backlog-sync.json \
   --label com.djensenius.arkham-backlog-sync \
   --log /Users/david/Library/Logs/arkham-backlog-sync.log \
   --binary /Users/david/bin/backlog-sync
 ```
+
+Release archives also include `launchd/backlog-sync.plist.template` with placeholders for the rendered LaunchAgent fields.
 
 Each config gets a distinct default lock path derived from the config path hash (or `lockFile` if configured). A second concurrent run for the same config exits 0 with `locked, skipping`; different configs can run side by side.
 
