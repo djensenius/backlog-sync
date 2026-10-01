@@ -521,6 +521,7 @@ func TestInboxManualModeClaimsUnmarkedInboxBeforeAdoption(t *testing.T) {
 	inbox := Issue{Number: 90, DatabaseID: 90, NodeID: "I_90", HTMLURL: "https://github.com/owner/repo/issues/90", Title: "Needs owner triage", Body: "body", State: "open", Repo: "owner/repo", Labels: []IssueLabel{{Name: "inbox"}}}
 	bl := newFakeBacklog(root, task)
 	gh := basicGH(map[string][]Issue{"owner/repo": {inbox}})
+	gh.items = nil
 	var logs []string
 	app := App{Git: fakeGit{worktrees: []Worktree{{Path: root, Branch: task.Branch, IsRoot: true}}, rootClean: false, rootReason: "should not matter"}, Backlog: bl, GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
 	c, err := app.Run(ctx, cfg)
