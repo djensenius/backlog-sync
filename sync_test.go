@@ -446,6 +446,336 @@ func TestMultiRepoInboxCreatesWithProjectAndReferenceGuard(t *testing.T) {
 	}
 }
 
+func TestInboxManualModeReportsNeedsTriageWithoutWrites(t *testing.T) {
+	ctx := context.Background()
+	root := tempRoot(t)
+	task := sampleTask()
+	task.Project = nil
+	task.ParentTaskID = nil
+	task.Dependencies = nil
+	task.Subtasks = nil
+	cfg := testConfig(root)
+	cfg.Inbox.Mode = InboxModeManual
+	body := RenderIssueBodyWithOptions(task, RenderOptions{Milestones: map[string]string{"m-0": "v1 release"}, MainBranch: cfg.MainBranch})
+	mirrored := Issue{Number: 16, DatabaseID: 16, NodeID: "I_16", HTMLURL: "https://github.com/owner/repo/issues/16", Title: IssueTitle(task), Body: body, State: "open", Repo: "owner/repo", Labels: labelsToIssueLabels(DesiredLabels(task, Issue{}, cfg))}
+	inbox := Issue{Number: 90, DatabaseID: 90, NodeID: "I_90", HTMLURL: "https://github.com/owner/repo/issues/90", Title: "Needs owner triage", Body: "body", State: "open", Repo: "owner/repo", Labels: []IssueLabel{{Name: "inbox"}}}
+	bl := newFakeBacklog(root, task)
+	gh := basicGH(map[string][]Issue{"owner/repo": {mirrored, inbox}})
+	gh.failOnWrite = true
+	var logs []string
+	app := App{Git: fakeGit{worktrees: []Worktree{{Path: root, Branch: task.Branch, IsRoot: true}}, rootClean: false, rootReason: "should not matter"}, Backlog: bl, GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	c, err := app.Run(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.InboxTriage != 1 || c.Imported != 0 || len(bl.created) != 0 || bl.pushed || gh.writeCalls() != 0 {
+		t.Fatalf("manual mode should report only without writes, counters=%+v creates=%d pushed=%v ghWrites=%d", c, len(bl.created), bl.pushed, gh.writeCalls())
+	}
+	if !logContains(logs, "inbox issue owner/repo#90 needs triage: Needs owner triage") || !logContains(logs, "1 inbox issues need triage") {
+		t.Fatalf("manual mode logs missing needs-triage lines: %v", logs)
+	}
+}
+
+func TestInboxManualModeMirrorsMarkedInboxIssueWithoutReporting(t *testing.T) {
+	ctx := context.Background()
+	root := tempRoot(t)
+	task := sampleTask()
+	task.ParentTaskID = nil
+	task.Dependencies = nil
+	task.Subtasks = nil
+	cfg := testConfig(root)
+	cfg.Inbox.Mode = InboxModeManual
+	markedInbox := Issue{Number: 16, DatabaseID: 16, NodeID: "I_16", HTMLURL: "https://github.com/owner/repo/issues/16", Title: "stale title", Body: MarkerFor(task.ID) + "\nstale body", State: "open", Repo: "owner/repo", Labels: []IssueLabel{{Name: "inbox"}, {Name: "external"}}}
+	bl := newFakeBacklog(root, task)
+	gh := basicGH(map[string][]Issue{"owner/repo": {markedInbox}})
+	var logs []string
+	app := App{Git: fakeGit{worktrees: []Worktree{{Path: root, Branch: task.Branch, IsRoot: true}}, rootClean: false, rootReason: "should not matter"}, Backlog: bl, GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	c, err := app.Run(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.InboxTriage != 0 || c.Created != 0 || c.Updated == 0 {
+		t.Fatalf("marked inbox issue should be mirrored, not reported or recreated, counters=%+v", c)
+	}
+	got := gh.issues["owner/repo"][0]
+	if got.Title != IssueTitle(task) || !strings.HasPrefix(got.Body, MarkerFor(task.ID)+"\n") || !hasLabelFold(got, "inbox") {
+		t.Fatalf("marked inbox issue was not mirrored with inbox label preserved: %+v", got)
+	}
+	if logContains(logs, "needs triage") {
+		t.Fatalf("marked inbox issue should not be reported for triage, logs=%v", logs)
+	}
+}
+
+func TestInboxManualModeClaimsUnmarkedInboxBeforeAdoption(t *testing.T) {
+	ctx := context.Background()
+	root := tempRoot(t)
+	task := sampleTask()
+	task.ParentTaskID = nil
+	task.Dependencies = nil
+	task.Subtasks = nil
+	task.Project = nil
+	task.References = []string{"https://github.com/owner/repo/issues/90"}
+	cfg := testConfig(root)
+	cfg.Inbox.Mode = InboxModeManual
+	cfg.AdoptReferencedIssues = true
+	inbox := Issue{Number: 90, DatabaseID: 90, NodeID: "I_90", HTMLURL: "https://github.com/owner/repo/issues/90", Title: "Needs owner triage", Body: "body", State: "open", Repo: "owner/repo", Labels: []IssueLabel{{Name: "inbox"}}}
+	bl := newFakeBacklog(root, task)
+	gh := basicGH(map[string][]Issue{"owner/repo": {inbox}})
+	gh.items = nil
+	var logs []string
+	app := App{Git: fakeGit{worktrees: []Worktree{{Path: root, Branch: task.Branch, IsRoot: true}}, rootClean: false, rootReason: "should not matter"}, Backlog: bl, GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	c, err := app.Run(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.InboxTriage != 1 || c.Created != 1 || len(gh.createdIssues) != 1 || len(bl.created) != 0 {
+		t.Fatalf("unmarked manual inbox issue should be reported and task should get a separate issue, counters=%+v createdIssues=%d backlogCreates=%d", c, len(gh.createdIssues), len(bl.created))
+	}
+	original := gh.issues["owner/repo"][0]
+	if original.Title != inbox.Title || original.Body != inbox.Body || !hasLabelFold(original, "inbox") || len(gh.updatedIssues) != 0 {
+		t.Fatalf("unmarked inbox issue should receive zero issue writes, original=%+v updates=%d", original, len(gh.updatedIssues))
+	}
+	if gh.addProjectItemCalls != 0 {
+		t.Fatalf("unmarked inbox issue should not be added to the project, addProjectItemCalls=%d", gh.addProjectItemCalls)
+	}
+	created := gh.createdIssues[0]
+	if created.Number == inbox.Number || created.Title != IssueTitle(task) || !strings.HasPrefix(created.Body, MarkerFor(task.ID)+"\n") {
+		t.Fatalf("task should get one new mirrored issue instead of adopting inbox issue, created=%+v", created)
+	}
+	if !logContains(logs, "inbox issue owner/repo#90 needs triage: Needs owner triage") || !logContains(logs, "refusing to adopt owner/repo#90 for task-16 because it is already claimed by manual inbox triage") {
+		t.Fatalf("manual mode should report triage and block adoption, logs=%v", logs)
+	}
+}
+
+func TestValidateConfigRejectsInvalidInboxMode(t *testing.T) {
+	cfg := testConfig("/repo")
+	cfg.Inbox.Mode = "invalid"
+	if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "inbox.mode") {
+		t.Fatalf("expected invalid inbox.mode error, got %v", err)
+	}
+}
+
+func TestDiscoverBacklogDirUsesRootConfigCustomDirectory(t *testing.T) {
+	root := t.TempDir()
+	customRel := "custom # backlog"
+	customPath := filepath.Join(root, customRel)
+	if err := os.MkdirAll(filepath.Join(customPath, "tasks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("# root Backlog.md config\nbacklog_directory: \"custom # backlog\" # data folder has no config.yml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := DiscoverBacklogDir(root)
+	if err != nil || !ok || got != customPath {
+		t.Fatalf("DiscoverBacklogDir=%q %v err=%v, want %q true nil", got, ok, err, customPath)
+	}
+}
+
+func TestDiscoverBacklogDirRootConfigWinsOverFolderLocalBacklog(t *testing.T) {
+	root := t.TempDir()
+	customRel := "custom-backlog"
+	customPath := filepath.Join(root, customRel)
+	if err := os.MkdirAll(filepath.Join(customPath, "tasks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	makeBacklogDataDir(t, filepath.Join(root, "backlog"))
+	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("backlog_directory: "+customRel+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := DiscoverBacklogDir(root)
+	if err != nil || !ok || got != customPath {
+		t.Fatalf("root config should win over folder-local backlog, got %q %v err=%v, want %q", got, ok, err, customPath)
+	}
+}
+
+func TestDiscoverBacklogDirRootConfigWithoutDirectoryFallsBack(t *testing.T) {
+	root := t.TempDir()
+	want := filepath.Join(root, "backlog")
+	makeBacklogDataDir(t, want)
+	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("# root config without backlog_directory\ntask_prefix: bug\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := DiscoverBacklogDir(root)
+	if err != nil || !ok || got != want {
+		t.Fatalf("root config without backlog_directory should fall back, got %q %v err=%v, want %q", got, ok, err, want)
+	}
+}
+
+func TestDiscoverBacklogDirUsesRootConfigForBuiltinDirectories(t *testing.T) {
+	for _, rel := range []string{"backlog", ".backlog"} {
+		t.Run(rel, func(t *testing.T) {
+			root := t.TempDir()
+			want := filepath.Join(root, rel)
+			if err := os.MkdirAll(filepath.Join(want, "tasks"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("backlog_directory: '"+rel+"/' # root config, no folder-local config.yml\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			got, ok, err := DiscoverBacklogDir(root)
+			if err != nil || !ok || got != want {
+				t.Fatalf("DiscoverBacklogDir=%q %v err=%v, want %q true nil", got, ok, err, want)
+			}
+		})
+	}
+}
+
+func TestDiscoverBacklogDirFallsBackToConfigYAML(t *testing.T) {
+	root := t.TempDir()
+	want := filepath.Join(root, "backlog")
+	if err := os.MkdirAll(filepath.Join(want, "tasks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(want, "config.yaml"), []byte("statuses: [\"To Do\", \"Done\"]\ntask_prefix: task\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := DiscoverBacklogDir(root)
+	if err != nil || !ok || got != want {
+		t.Fatalf("config.yaml Backlog dir not discovered, got %q %v err=%v, want %q", got, ok, err, want)
+	}
+}
+
+func TestDiscoverBacklogDirRootConfigMissingTargetErrors(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("backlog_directory: missing # target is absent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, ok, err := DiscoverBacklogDir(root)
+	if err == nil || ok || !strings.Contains(err.Error(), "backlog.config.yml") || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("expected clear missing-target error, ok=%v err=%v", ok, err)
+	}
+}
+
+func TestDiscoverBacklogDirRejectsSymlinkedBacklogDirOutsideWorktree(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		rel             string
+		writeRootConfig bool
+	}{
+		{name: "root config", rel: "custom", writeRootConfig: true},
+		{name: "backlog", rel: "backlog"},
+		{name: ".backlog", rel: ".backlog"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			outside := filepath.Join(t.TempDir(), "external-backlog")
+			makeBacklogDataDir(t, outside)
+			if err := os.Symlink(outside, filepath.Join(root, tc.rel)); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+			if tc.writeRootConfig {
+				if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("backlog_directory: "+tc.rel+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			got, ok, err := DiscoverBacklogDir(root)
+			if err == nil || ok {
+				t.Fatalf("DiscoverBacklogDir=%q %v err=%v, want containment error", got, ok, err)
+			}
+			if !strings.Contains(err.Error(), "must stay inside the worktree") {
+				t.Fatalf("error should explain containment failure, got %v", err)
+			}
+		})
+	}
+}
+
+func TestDiscoverBacklogDirAcceptsSymlinkedBacklogDirInsideWorktree(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		rel             string
+		writeRootConfig bool
+	}{
+		{name: "root config", rel: "custom", writeRootConfig: true},
+		{name: "backlog", rel: "backlog"},
+		{name: ".backlog", rel: ".backlog"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			target := filepath.Join(root, "actual-backlog")
+			makeBacklogDataDir(t, target)
+			want := filepath.Join(root, tc.rel)
+			if err := os.Symlink(target, want); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+			if tc.writeRootConfig {
+				if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("backlog_directory: "+tc.rel+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			got, ok, err := DiscoverBacklogDir(root)
+			if err != nil || !ok || got != want {
+				t.Fatalf("DiscoverBacklogDir=%q %v err=%v, want %q true nil", got, ok, err, want)
+			}
+		})
+	}
+}
+
+func TestDiscoverBacklogDirAllowsWorktreeReachedThroughSymlinkedParent(t *testing.T) {
+	base := t.TempDir()
+	realParent := filepath.Join(base, "real-parent")
+	realRoot := filepath.Join(realParent, "repo")
+	makeBacklogDataDir(t, filepath.Join(realRoot, "backlog"))
+	linkParent := filepath.Join(base, "link-parent")
+	if err := os.Symlink(realParent, linkParent); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	rootViaLink := filepath.Join(linkParent, "repo")
+	want := filepath.Join(rootViaLink, "backlog")
+
+	got, ok, err := DiscoverBacklogDir(rootViaLink)
+	if err != nil || !ok || got != want {
+		t.Fatalf("DiscoverBacklogDir=%q %v err=%v, want %q true nil", got, ok, err, want)
+	}
+}
+
+func TestCollectTasksDiscoversBuiltInAndRootConfigBacklogDirs(t *testing.T) {
+	root := t.TempDir()
+	hidden := t.TempDir()
+	custom := t.TempDir()
+	makeBacklogDataDir(t, filepath.Join(root, "backlog"))
+	makeBacklogDataDir(t, filepath.Join(hidden, ".backlog"))
+	makeBacklogDataDir(t, filepath.Join(custom, "workflow", "data"))
+	if err := os.WriteFile(filepath.Join(custom, "backlog.config.yml"), []byte("backlog_directory: workflow/data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mainTask := sampleTask()
+	mainTask.ID = "TASK-1"
+	hiddenTask := sampleTask()
+	hiddenTask.ID = "TASK-2"
+	customTask := sampleTask()
+	customTask.ID = "TASK-3"
+	bl := &fakeBacklog{statuses: []string{"To Do", "In Progress", "Done"}, tasksByDir: map[string][]Task{root: {mainTask}, hidden: {hiddenTask}, custom: {customTask}}, createdID: "TASK-99"}
+	resolved, err := CollectTasks(context.Background(), testConfig(root), fakeGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}, {Path: hidden, Branch: "task-2-fix"}, {Path: custom, Branch: "task-3-fix"}}}, bl, func(string, ...any) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved.Tasks) != 3 || resolved.ByID["task-1"].ID == "" || resolved.ByID["task-2"].ID == "" || resolved.ByID["task-3"].ID == "" {
+		t.Fatalf("expected tasks from backlog, .backlog, and root-config custom dirs, got %+v", resolved.ByID)
+	}
+}
+
+func TestCollectTasksSkipsNonRootWorktreeWithUnresolvableBacklogDir(t *testing.T) {
+	root := t.TempDir()
+	other := t.TempDir()
+	makeBacklogDataDir(t, filepath.Join(root, "backlog"))
+	if err := os.WriteFile(filepath.Join(other, "backlog.config.yml"), []byte("backlog_directory: missing\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mainTask := sampleTask()
+	mainTask.ID = "TASK-1"
+	bl := &fakeBacklog{statuses: []string{"To Do", "In Progress", "Done"}, tasksByDir: map[string][]Task{root: {mainTask}}, createdID: "TASK-99"}
+	var logs []string
+	resolved, err := CollectTasks(context.Background(), testConfig(root), fakeGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}, {Path: other, Branch: "task-2"}}}, bl, func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved.Tasks) != 1 || !logContains(logs, "cannot resolve Backlog directory") || !logContains(logs, "does not exist") {
+		t.Fatalf("unresolvable non-root worktree should be skipped with a clear log, tasks=%+v logs=%v", resolved.ByID, logs)
+	}
+}
+
 func TestProjectFieldsMilestoneParserAndSubIssueWarnOnce(t *testing.T) {
 	got := ParseMilestones("  m-0: M1: Night of the Zealot on Apple (0/3 done)\n")
 	if got["m-0"] != "M1: Night of the Zealot on Apple" {
@@ -715,19 +1045,19 @@ func TestSubIssueParentDiffAndExpectedRejectionWarnsOnce(t *testing.T) {
 	gh := basicGH(map[string][]Issue{"owner/repo": {parent, child}})
 	gh.parents["C"] = IssueParentInfo{ID: "P", Number: 1, Repo: "owner/repo"}
 	app := App{GitHub: gh, Logf: func(string, ...any) {}}
-	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues)
+	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, nil)
 	if links != 0 || failed != 0 || gh.addSubIssueCalls != 0 || gh.removeSubIssueCalls != 0 {
 		t.Fatalf("same parent should be no-op links=%d failed=%d add=%d remove=%d", links, failed, gh.addSubIssueCalls, gh.removeSubIssueCalls)
 	}
 	gh.parents["C"] = IssueParentInfo{ID: "OLD", Number: 9, Repo: "owner/repo"}
-	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues)
+	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues, nil)
 	if links != 1 || failed != 0 || gh.removeSubIssueCalls != 1 || gh.addSubIssueCalls != 1 {
 		t.Fatalf("different parent should remove then add links=%d failed=%d add=%d remove=%d", links, failed, gh.addSubIssueCalls, gh.removeSubIssueCalls)
 	}
 	gh = basicGH(map[string][]Issue{"owner/repo": {parent, child}})
 	gh.parents["C"] = IssueParentInfo{ID: "FOREIGN", Number: 99, Repo: "evil/repo"}
 	app = App{GitHub: gh, Logf: func(string, ...any) {}}
-	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues)
+	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues, nil)
 	if links != 0 || failed != 0 || gh.writeCalls() != 0 {
 		t.Fatalf("foreign parent should skip all writes links=%d failed=%d writes=%d", links, failed, gh.writeCalls())
 	}
@@ -739,7 +1069,7 @@ func TestSubIssueParentDiffAndExpectedRejectionWarnsOnce(t *testing.T) {
 	gh.subIssueErr = errors.New("unsupported")
 	var logs []string
 	app = App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
-	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues)
+	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues, nil)
 	if links != 0 || failed != 0 || strings.Count(strings.Join(logs, "\n"), "sub-issue links are not supported") != 1 || gh.addSubIssueCalls != 2 {
 		t.Fatalf("expected unsupported sub-issue rejection to warn once without failing, links=%d failed=%d calls=%d logs=%v", links, failed, gh.addSubIssueCalls, logs)
 	}
@@ -748,9 +1078,34 @@ func TestSubIssueParentDiffAndExpectedRejectionWarnsOnce(t *testing.T) {
 	gh.subIssueErr = errors.New("api exploded")
 	logs = nil
 	app = App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
-	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues)
+	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues, nil)
 	if links != 0 || failed != 2 || strings.Count(strings.Join(logs, "\n"), "add sub-issue") != 2 || !logContains(logs, "task-1.1") || !logContains(logs, "task-1.2") || gh.addSubIssueCalls != 2 {
 		t.Fatalf("expected unexpected sub-issue API errors to fail per task, links=%d failed=%d calls=%d logs=%v", links, failed, gh.addSubIssueCalls, logs)
+	}
+}
+
+func TestSubIssueSkipsCurrentManualInboxTriageParent(t *testing.T) {
+	ctx := context.Background()
+	root := tempRoot(t)
+	cfg := testConfig(root)
+	parent := Issue{Number: 1, DatabaseID: 1, NodeID: "P", Repo: "owner/repo"}
+	child := Issue{Number: 2, DatabaseID: 2, NodeID: "C", Repo: "owner/repo"}
+	child2 := Issue{Number: 3, DatabaseID: 3, NodeID: "C2", Repo: "owner/repo"}
+	inboxParent := Issue{Number: 90, DatabaseID: 90, NodeID: "I_90", Repo: "owner/repo", Labels: []IssueLabel{{Name: "inbox"}}}
+	resolved := ResolvedTasks{Tasks: []Task{{ID: "TASK-1"}, {ID: "TASK-1.1", ParentTaskID: sp("TASK-1")}, {ID: "TASK-1.2", ParentTaskID: sp("TASK-1")}}}
+	issues := map[string]Issue{"task-1": parent, "task-1.1": child, "task-1.2": child2}
+	gh := basicGH(map[string][]Issue{"owner/repo": {parent, child, child2, inboxParent}})
+	gh.parents["C"] = IssueParentInfo{ID: inboxParent.NodeID, Number: inboxParent.Number, Repo: inboxParent.Repo}
+	gh.parents["C2"] = IssueParentInfo{ID: inboxParent.NodeID, Number: inboxParent.Number, Repo: inboxParent.Repo}
+	var logs []string
+	app := App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	claims := map[string]string{issueClaimKey(inboxParent): manualInboxTriageClaim}
+	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, claims)
+	if links != 0 || failed != 0 || gh.addSubIssueCalls != 0 || gh.removeSubIssueCalls != 0 {
+		t.Fatalf("manual inbox triage parent should skip all sub-issue writes links=%d failed=%d add=%d remove=%d", links, failed, gh.addSubIssueCalls, gh.removeSubIssueCalls)
+	}
+	if strings.Count(strings.Join(logs, "\n"), "manual inbox triage") != 1 {
+		t.Fatalf("expected one manual inbox triage warning, logs=%v", logs)
 	}
 }
 
@@ -839,6 +1194,17 @@ func TestGitStatusUsesNoOptionalLocks(t *testing.T) {
 	}
 }
 
+func TestExecTaskPrefixFallsBackToRootConfig(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("backlog_directory: custom\ntask_prefix: 'bug' # root setting\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prefix, err := (ExecBacklog{Runner: &scriptRunner{outputs: map[string][]byte{}}}).TaskPrefix(context.Background(), root)
+	if err != nil || prefix != "bug" {
+		t.Fatalf("TaskPrefix root fallback=%q err=%v, want bug nil", prefix, err)
+	}
+}
+
 func TestExecParsersAndJSONShapes(t *testing.T) {
 	wt := ParseWorktrees("worktree /repo\nbranch refs/heads/main\n\nworktree /repo-task\nbranch refs/heads/task-1-fix\n\nworktree /bare\nbare\n", "/repo")
 	if len(wt) != 3 || !wt[0].IsRoot || wt[1].Branch != "task-1-fix" || !wt[2].Bare {
@@ -903,10 +1269,18 @@ func TestTaskViewJSONFixtureFieldNames(t *testing.T) {
 func tempRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, "backlog"), 0o755); err != nil {
+	makeBacklogDataDir(t, filepath.Join(root, "backlog"))
+	return root
+}
+
+func makeBacklogDataDir(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(path, "tasks"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return root
+	if err := os.WriteFile(filepath.Join(path, "config.yml"), []byte("statuses: [\"To Do\", \"In Progress\", \"Done\"]\ntask_prefix: \"task\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func sampleTask() Task {
@@ -1030,7 +1404,8 @@ func (b *fakeBacklog) ViewTask(_ context.Context, dir, id string) (TaskViewRespo
 	if b.viewErr != nil {
 		return TaskViewResponse{}, b.viewErr
 	}
-	for _, task := range b.tasksByDir[dir] {
+	tasks := b.tasksByDir[dir]
+	for _, task := range tasks {
 		if CanonicalTaskID(task.ID) == CanonicalTaskID(id) {
 			return TaskViewResponse{Task: task}, nil
 		}
@@ -1055,26 +1430,20 @@ func (b *fakeBacklog) TaskPrefix(context.Context, string) (string, error) {
 func (b *fakeBacklog) Milestones(context.Context, string) (map[string]string, error) {
 	return map[string]string{"m-0": "v1 release"}, nil
 }
-func (b *fakeBacklog) CreateTask(_ context.Context, _ string, in CreateTaskInput) (string, error) {
+func (b *fakeBacklog) CreateTask(_ context.Context, dir string, in CreateTaskInput) (string, error) {
 	if b.createErr != nil {
 		return "", b.createErr
 	}
 	p := in.Project
 	task := Task{ID: b.createdID, Title: in.Title, Description: in.Description, Labels: in.Labels, Status: "To Do", Project: &p, References: in.References}
 	b.created = append(b.created, task)
-	b.tasksByDir[firstDir(b.tasksByDir)] = append(b.tasksByDir[firstDir(b.tasksByDir)], task)
+	b.tasksByDir[dir] = append(b.tasksByDir[dir], task)
 	return b.createdID, nil
 }
 func (b *fakeBacklog) Push(context.Context, string, string) error {
 	b.pushed = true
 	b.pushCount++
 	return nil
-}
-func firstDir(m map[string][]Task) string {
-	for k := range m {
-		return k
-	}
-	return ""
 }
 
 type fakeGitHub struct {
@@ -1258,7 +1627,6 @@ func (g *fakeGitHub) RemoveSubIssue(_ context.Context, _ string, childNodeID str
 	delete(g.parents, childNodeID)
 	return nil
 }
-
 func (g *fakeGitHub) resetWriteCounters() {
 	g.updatedIssues = nil
 	g.createdIssues = nil
@@ -1269,7 +1637,6 @@ func (g *fakeGitHub) resetWriteCounters() {
 	g.addSubIssueCalls = 0
 	g.removeSubIssueCalls = 0
 }
-
 func (g *fakeGitHub) writeCalls() int {
 	return len(g.updatedIssues) + len(g.createdIssues) + g.ensureLabelCalls + g.addProjectItemCalls + g.updateProjectStatusCalls + g.fieldUpdates + g.addSubIssueCalls + g.removeSubIssueCalls
 }

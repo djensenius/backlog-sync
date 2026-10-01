@@ -36,8 +36,16 @@ type Config struct {
 type InboxConfig struct {
 	Enabled bool   `json:"enabled"`
 	Label   string `json:"label"`
-	Push    bool   `json:"push"`
+	Mode    string `json:"mode"`
+	// Push is the legacy push-mode switch. It is still honored in push mode
+	// so existing direct-commit configs keep their previous behavior.
+	Push bool `json:"push"`
 }
+
+const (
+	InboxModePush   = "push"
+	InboxModeManual = "manual"
+)
 
 type LabelConfig struct {
 	Managed        []string `json:"managed"`
@@ -196,6 +204,7 @@ type Counters struct {
 	Updated       int
 	StatusChanges int
 	Imported      int
+	InboxTriage   int
 	ProjectAdded  int
 	FieldChanges  int
 	SubIssueLinks int
@@ -218,6 +227,9 @@ func (cfg Config) Normalized() Config {
 	}
 	if cfg.Inbox.Label == "" {
 		cfg.Inbox.Label = "inbox"
+	}
+	if cfg.Inbox.Mode == "" {
+		cfg.Inbox.Mode = InboxModePush
 	}
 	if cfg.TimeoutSeconds == 0 {
 		cfg.TimeoutSeconds = 60

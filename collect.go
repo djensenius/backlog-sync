@@ -54,11 +54,24 @@ func CollectTasks(ctx context.Context, cfg Config, git Git, backlog Backlog, log
 		if shouldSkipWorktree(wt) {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(wt.Path, "backlog")); err != nil {
+		if dir, ok, err := DiscoverBacklogDir(wt.Path); err != nil {
+			if wt.IsRoot {
+				return ResolvedTasks{}, fmt.Errorf("discover Backlog directory in main worktree %s: %w", wt.Path, err)
+			}
 			if logf != nil {
-				logf("skip worktree without backlog/: %s", wt.Path)
+				logf("skip worktree: cannot resolve Backlog directory %s: %v", wt.Path, err)
 			}
 			continue
+		} else if !ok {
+			if wt.IsRoot {
+				return ResolvedTasks{}, fmt.Errorf("discover Backlog directory in main worktree %s: no Backlog directory found", wt.Path)
+			}
+			if logf != nil {
+				logf("skip worktree without Backlog directory: %s", wt.Path)
+			}
+			continue
+		} else if logf != nil {
+			logf("scan Backlog directory %s", dir)
 		}
 		summaries, err := listAllTasks(ctx, backlog, wt.Path)
 		if err != nil {
@@ -146,6 +159,198 @@ func shouldSkipWorktree(wt Worktree) bool {
 		return true
 	}
 	return false
+}
+
+func DiscoverBacklogDir(root string) (string, bool, error) {
+	// Match the Backlog.md CLI layouts resolved from the worktree root: root
+	// backlog.config.yml backlog_directory, then backlog/, then .backlog/.
+	// Do not recursively search nested config files; the syncer invokes the CLI
+	// from wt.Path, and the CLI would not resolve those nested folders either.
+	resolvedRoot, err := evalSymlinksAbs(root)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve worktree root %s: %w", root, err)
+	}
+	if path, ok, err := discoverBacklogDirFromRootConfig(root, resolvedRoot); err != nil || ok {
+		return path, ok, err
+	}
+	for _, rel := range []string{"backlog", ".backlog"} {
+		path := filepath.Join(root, rel)
+		if isBacklogDataDir(path) {
+			if err := requireInsideResolvedWorktree(resolvedRoot, path, fmt.Sprintf("Backlog directory %q", rel)); err != nil {
+				return "", false, err
+			}
+			return path, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+const rootBacklogConfigFile = "backlog.config.yml"
+
+func discoverBacklogDirFromRootConfig(root, resolvedRoot string) (string, bool, error) {
+	configPath := filepath.Join(root, rootBacklogConfigFile)
+	data, err := os.ReadFile(configPath)
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read %s: %w", configPath, err)
+	}
+	rel, ok, err := parseRootConfigValue(data, "backlog_directory")
+	if err != nil {
+		return "", false, fmt.Errorf("parse %s: %w", configPath, err)
+	}
+	if !ok {
+		return "", false, nil
+	}
+	if filepath.IsAbs(rel) {
+		return "", false, fmt.Errorf("%s backlog_directory must be project-relative: %q", configPath, rel)
+	}
+	clean := filepath.Clean(rel)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return "", false, fmt.Errorf("%s backlog_directory must stay inside the worktree: %q", configPath, rel)
+	}
+	path := filepath.Join(root, clean)
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return "", false, fmt.Errorf("%s backlog_directory target %q does not exist", configPath, rel)
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("stat %s backlog_directory target %q: %w", configPath, rel, err)
+	}
+	if !info.IsDir() {
+		return "", false, fmt.Errorf("%s backlog_directory target %q is not a directory", configPath, rel)
+	}
+	if err := requireInsideResolvedWorktree(resolvedRoot, path, fmt.Sprintf("%s backlog_directory target %q", configPath, rel)); err != nil {
+		return "", false, err
+	}
+	return path, true, nil
+}
+
+func evalSymlinksAbs(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(abs)
+}
+
+func requireInsideResolvedWorktree(resolvedRoot, candidate, description string) error {
+	resolvedCandidate, err := evalSymlinksAbs(candidate)
+	if err != nil {
+		return fmt.Errorf("resolve %s %s: %w", description, candidate, err)
+	}
+	if !pathWithin(resolvedRoot, resolvedCandidate) {
+		return fmt.Errorf("%s must stay inside the worktree: %q resolves to %q outside %q", description, candidate, resolvedCandidate, resolvedRoot)
+	}
+	return nil
+}
+
+func pathWithin(root, candidate string) bool {
+	rel, err := filepath.Rel(root, candidate)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel))
+}
+
+func parseRootConfigValue(data []byte, name string) (string, bool, error) {
+	for i, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, rawValue, ok := strings.Cut(line, ":")
+		if !ok || strings.TrimSpace(key) != name {
+			continue
+		}
+		value := stripYAMLComment(strings.TrimSpace(rawValue))
+		value, err := unquoteYAMLScalar(strings.TrimSpace(value))
+		if err != nil {
+			return "", false, fmt.Errorf("line %d: %w", i+1, err)
+		}
+		if value == "" {
+			return "", false, fmt.Errorf("line %d: %s is empty", i+1, name)
+		}
+		return value, true, nil
+	}
+	return "", false, nil
+}
+
+func stripYAMLComment(value string) string {
+	quote := byte(0)
+	escaped := false
+	for i := 0; i < len(value); i++ {
+		ch := value[i]
+		if quote != 0 {
+			if quote == '"' && escaped {
+				escaped = false
+				continue
+			}
+			if quote == '"' && ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		if ch == '"' || ch == '\'' {
+			quote = ch
+			continue
+		}
+		if ch == '#' && (i == 0 || value[i-1] == ' ' || value[i-1] == '\t') {
+			return strings.TrimSpace(value[:i])
+		}
+	}
+	return value
+}
+
+func unquoteYAMLScalar(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	quote := value[0]
+	if quote != '"' && quote != '\'' {
+		return value, nil
+	}
+	if len(value) < 2 || value[len(value)-1] != quote {
+		return "", fmt.Errorf("unterminated quoted value")
+	}
+	inner := value[1 : len(value)-1]
+	if quote == '\'' {
+		return strings.ReplaceAll(inner, "''", "'"), nil
+	}
+	inner = strings.ReplaceAll(inner, `\\`, `\`)
+	inner = strings.ReplaceAll(inner, `\"`, `"`)
+	return inner, nil
+}
+
+func isBacklogDataDir(path string) bool {
+	configPath, ok := backlogDataConfigPath(path)
+	if !ok {
+		return false
+	}
+	if taskInfo, err := os.Stat(filepath.Join(path, "tasks")); err == nil && taskInfo.IsDir() {
+		return true
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), "task_prefix:") || strings.Contains(string(data), "statuses:")
+}
+
+func backlogDataConfigPath(path string) (string, bool) {
+	for _, name := range []string{"config.yml", "config.yaml"} {
+		configPath := filepath.Join(path, name)
+		info, err := os.Stat(configPath)
+		if err == nil && !info.IsDir() {
+			return configPath, true
+		}
+	}
+	return "", false
 }
 
 func ResolveTaskCopy(id string, copies []TaskCopy, statusRank map[string]int, root string) TaskCopy {

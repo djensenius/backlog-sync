@@ -69,11 +69,12 @@ func (a *App) Run(ctx context.Context, cfg Config) (Counters, error) {
 		a.Logf("error: %s %s failed: %v", CanonicalTaskID(taskID), operation, err)
 	}
 	if cfg.Inbox.Enabled && !cfg.NoInbox {
-		imported, linked, err := a.processInbox(ctx, cfg, allIssues, markerIssues, issueByTaskID, claimedIssues, resolved)
+		imported, triage, linked, err := a.processInbox(ctx, cfg, allIssues, markerIssues, issueByTaskID, claimedIssues, resolved)
 		if err != nil {
 			return counters, err
 		}
 		counters.Imported += imported
+		counters.InboxTriage += triage
 		for id, issue := range linked {
 			markerIssues[id] = issue
 			issueByTaskID[id] = issue
@@ -241,11 +242,11 @@ func (a *App) Run(ctx context.Context, cfg Config) (Counters, error) {
 		}
 	}
 	if cfg.SubIssues {
-		linked, failed := a.syncSubIssues(ctx, cfg, resolved, issueByTaskID)
+		linked, failed := a.syncSubIssues(ctx, cfg, resolved, issueByTaskID, claimedIssues)
 		counters.SubIssueLinks += linked
 		counters.Failed += failed
 	}
-	a.Logf("sync complete: %d created, %d updated, %d status changes, %d imported, %d failed operations", counters.Created, counters.Updated, counters.StatusChanges, counters.Imported, counters.Failed)
+	a.Logf("sync complete: %d created, %d updated, %d status changes, %d imported, %d inbox issues need triage, %d failed operations", counters.Created, counters.Updated, counters.StatusChanges, counters.Imported, counters.InboxTriage, counters.Failed)
 	if counters.Failed > 0 {
 		return counters, fmt.Errorf("%d task sync operation(s) failed", counters.Failed)
 	}
@@ -441,12 +442,34 @@ func DiffIssue(task Task, issue Issue, body string, labels []string) (IssuePatch
 	return patch, fields
 }
 
-func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, markerIssues map[string]Issue, issueByTaskID map[string]Issue, claimedIssues map[string]string, resolved ResolvedTasks) (imported int, linked map[string]Issue, err error) {
+const manualInboxTriageClaim = "manual inbox triage"
+
+func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, markerIssues map[string]Issue, issueByTaskID map[string]Issue, claimedIssues map[string]string, resolved ResolvedTasks) (imported int, triage int, linked map[string]Issue, err error) {
+	linked = map[string]Issue{}
+	if cfg.Inbox.Mode == InboxModeManual {
+		for _, issue := range issues {
+			if issue.State != "open" || !hasLabelFold(issue, cfg.Inbox.Label) {
+				continue
+			}
+			if id, ok := ParseMarkerWithPrefix(issue.Body, cfg.TaskPrefix); ok {
+				if key := issueClaimKey(issue); key != "" {
+					claimedIssues[key] = id
+				}
+				continue
+			}
+			if key := issueClaimKey(issue); key != "" {
+				claimedIssues[key] = manualInboxTriageClaim
+			}
+			a.Logf("inbox issue %s#%d needs triage: %s", issue.Repo, issue.Number, issue.Title)
+			triage++
+		}
+		return 0, triage, linked, nil
+	}
+
 	clean, reason, err := a.Git.RootBranchClean(ctx, cfg.Root, cfg.MainBranch)
 	if err != nil {
-		return 0, nil, err
+		return 0, 0, nil, err
 	}
-	linked = map[string]Issue{}
 	defer func() {
 		if imported > 0 && cfg.Inbox.Push && !cfg.DryRun {
 			if pushErr := a.Backlog.Push(ctx, cfg.Root, cfg.MainBranch); pushErr != nil {
@@ -466,7 +489,7 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 			if !cfg.DryRun {
 				updated, err = a.GitHub.UpdateIssue(ctx, issue.Repo, issue.Number, patch)
 				if err != nil {
-					return imported, linked, err
+					return imported, triage, linked, err
 				}
 			}
 			updated.Repo = issue.Repo
@@ -492,14 +515,14 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 			if existing, ok := markerIssues[canonicalTaskID]; ok && !sameIssue(existing, issue) {
 				a.Logf("warning: refusing to mark inbox issue %s#%d for %s because %s already has %s#%d; removing only inbox label", issue.Repo, issue.Number, canonicalTaskID, canonicalTaskID, existing.Repo, existing.Number)
 				if err := a.stripInboxLabel(ctx, cfg, issue); err != nil {
-					return imported, linked, err
+					return imported, triage, linked, err
 				}
 				continue
 			}
 			if owner, claimed := claimedIssues[issueClaimKey(issue)]; claimed && owner != canonicalTaskID {
 				a.Logf("warning: refusing to mark inbox issue %s#%d for %s because it is already claimed by %s; removing only inbox label", issue.Repo, issue.Number, canonicalTaskID, owner)
 				if err := a.stripInboxLabel(ctx, cfg, issue); err != nil {
-					return imported, linked, err
+					return imported, triage, linked, err
 				}
 				continue
 			}
@@ -513,7 +536,7 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 			} else {
 				id, err := a.Backlog.CreateTask(ctx, cfg.Root, CreateTaskInput{Title: issue.Title, Description: description, Labels: []string{}, Project: project, References: []string{issueURL}, TaskPrefix: cfg.TaskPrefix})
 				if err != nil {
-					return imported, linked, err
+					return imported, triage, linked, err
 				}
 				taskID = id
 				imported++
@@ -530,7 +553,7 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 		patch := IssuePatch{Title: &title, Body: &body, Labels: &labels}
 		updated, err := a.GitHub.UpdateIssue(ctx, issue.Repo, issue.Number, patch)
 		if err != nil {
-			return imported, linked, err
+			return imported, triage, linked, err
 		}
 		updated.Repo = issue.Repo
 		linked[CanonicalTaskID(taskID)] = updated
@@ -540,7 +563,7 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 			claimedIssues[key] = CanonicalTaskID(taskID)
 		}
 	}
-	return imported, linked, nil
+	return imported, triage, linked, nil
 }
 
 func (a *App) stripInboxLabel(ctx context.Context, cfg Config, issue Issue) error {
@@ -559,6 +582,13 @@ func issueClaimKey(issue Issue) string {
 		return ""
 	}
 	return strings.ToLower(fmt.Sprintf("%s#%d", issue.Repo, issue.Number))
+}
+
+func isManualInboxTriageClaim(issue IssueParentInfo, claimedIssues map[string]string) bool {
+	if issue.Repo == "" || issue.Number == 0 {
+		return false
+	}
+	return claimedIssues[strings.ToLower(fmt.Sprintf("%s#%d", issue.Repo, issue.Number))] == manualInboxTriageClaim
 }
 
 func sameIssue(a, b Issue) bool {
@@ -794,7 +824,7 @@ func (a *App) logDryRunFieldSets(cfg Config, project ProjectInfo, task Task, mil
 	return count
 }
 
-func (a *App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTasks, issueByTaskID map[string]Issue) (linked int, failed int) {
+func (a *App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTasks, issueByTaskID map[string]Issue, claimedIssues map[string]string) (linked int, failed int) {
 	warned := map[string]bool{}
 	for _, task := range resolved.Tasks {
 		id := CanonicalTaskID(task.ID)
@@ -819,6 +849,10 @@ func (a *App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTa
 			continue
 		}
 		if current.ID != "" {
+			if isManualInboxTriageClaim(current, claimedIssues) {
+				a.warnOnce(warned, "manual-inbox-triage-parent", "warning: refusing to change sub-issue parent %s#%d for %s#%d because the current parent needs manual inbox triage; skipping link", current.Repo, current.Number, child.Repo, child.Number)
+				continue
+			}
 			if !cfg.RepoAllowed(current.Repo) {
 				a.warnOnce(warned, "foreign-parent-"+current.Repo, "warning: refusing to remove foreign sub-issue parent %s#%d for %s#%d; skipping link", current.Repo, current.Number, child.Repo, child.Number)
 				continue

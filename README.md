@@ -1,6 +1,6 @@
 # Backlog Sync
 
-`backlog-sync` mirrors local Backlog.md tasks to GitHub Issues and GitHub Project v2. Backlog.md remains the source of truth; GitHub edits are overwritten on the next sync except for the narrow `inbox` import path.
+`backlog-sync` mirrors local Backlog.md tasks to GitHub Issues and GitHub Project v2. Backlog.md remains the source of truth; GitHub edits are overwritten on the next sync except for the narrow `inbox` push import path.
 
 The binary is consumer-neutral. All repo/project choices come from a JSON config selected with `--config <path>` (default: `<root>/.backlog-sync.json`). Flags only override config fields for local testing.
 
@@ -23,7 +23,7 @@ The binary is consumer-neutral. All repo/project choices come from a JSON config
   "defaultRepo": "djensenius/ArkhamHorror-Project",
   "mainBranch": "main",
   "statusMap": {},
-  "inbox": { "enabled": true, "label": "inbox", "push": true },
+  "inbox": { "enabled": true, "label": "inbox", "mode": "push", "push": true },
   "adoptReferencedIssues": false,
   "labels": {
     "managed": ["backlog", "type:*", "area:*", "priority:*", "upstream-candidate", "roadmap", "owner"],
@@ -54,7 +54,7 @@ Canadian Ham config committed at the repository root:
   "defaultRepo": "djensenius/canadian-ham",
   "mainBranch": "main",
   "statusMap": {},
-  "inbox": { "enabled": true, "label": "inbox", "push": true },
+  "inbox": { "enabled": true, "label": "inbox", "mode": "manual" },
   "adoptReferencedIssues": false,
   "labels": { "managed": ["*"], "addAlways": [] },
   "subIssues": true,
@@ -66,11 +66,11 @@ Canadian Ham config committed at the repository root:
 
 ## Cross-worktree Backlog reads
 
-The tool runs `git -C <root> worktree list --porcelain`, skips bare/prunable/missing worktrees and worktrees without `backlog/`, then reads each worktree through the `backlog` CLI (`task list --json` with pagination and `task view <id> --json`). Pagination is validated against the reported `total`. The main worktree must be scanned and must return at least one task before any GitHub call is made.
+The tool runs `git -C <root> worktree list --porcelain`, skips bare/prunable/missing worktrees and worktrees without a Backlog data directory, then reads each worktree through the `backlog` CLI (`task list --json` with pagination and `task view <id> --json`). The data directory is discovered read-only from the worktree using the same layouts the Backlog.md CLI resolves when run from the worktree root: root `backlog.config.yml` `backlog_directory`, then `backlog/`, then `.backlog/`. It does not recursively search for nested custom folders because the CLI invoked from the worktree root would not use them. Pagination is validated against the reported `total`. The main worktree must resolve and scan a Backlog directory and must return at least one task before any GitHub call is made.
 
 `BACKLOG_CWD` and other `BACKLOG_*` environment variables are stripped from child processes so the CLI reads the intended worktree. Remote-only branches without a local worktree are out of scope.
 
-Task IDs use the Backlog task prefix read from `backlog config get taskPrefix` / `task_prefix`, falling back to read-only parsing of `backlog/config.yml` when needed. IDs are normalized to lowercase for markers and title prefixes, including dotted IDs such as `task-1.2.7`.
+Task IDs use the Backlog task prefix read from `backlog config get taskPrefix` / `task_prefix`, falling back to read-only parsing of root `backlog.config.yml` and then the discovered Backlog `config.yml` or `config.yaml` when needed. IDs are normalized to lowercase for markers and title prefixes, including dotted IDs such as `task-1.2.7`.
 
 ## Task resolution and placement
 
@@ -111,9 +111,12 @@ When `subIssues` is true, the tool checks each child issue's current GitHub pare
 
 Open issues labelled with the configured inbox label are scanned in every configured repo. The inbox label is not a managed mirror label.
 
-Before creating a task, the root worktree must be on `mainBranch`, not mid-merge/rebase/cherry-pick, and have a clean worktree/index. The tool first checks whether any task already references the issue URL; if so, it reuses that task and only marks the issue. Otherwise it creates a task with `--ref <issue URL>`, `--project <reverse-mapped project>` when applicable, and the issue body as the description. It then immediately removes the inbox label, prepends the marker, and retitles the issue. After any inbox creation, `git -C <root> push origin <mainBranch>` runs when `inbox.push` is true; push failures are logged without aborting. Existing tasks are never updated.
+`inbox.mode` selects how new tasks are imported:
 
-`--dry-run` performs no GitHub, Backlog, or git writes.
+- `push` preserves the direct-commit behavior used by repositories whose Backlog branch is allowed to take direct commits. Before creating a task, the root worktree must be on `mainBranch`, not mid-merge/rebase/cherry-pick, and have a clean worktree/index. The tool first checks whether any task already references the issue URL; if so, it reuses that task and only marks the issue. Otherwise it creates a task with `--ref <issue URL>`, `--project <reverse-mapped project>` when applicable, and the issue body as the description. It then immediately removes the inbox label, prepends the marker, and retitles the issue. After any inbox creation, `git -C <root> push origin <mainBranch>` runs when legacy `inbox.push` is true; push failures are logged without aborting.
+- `manual` is report-only for repositories where inbox issues must be triaged into normal task changes by a coordinator. An open inbox-labelled issue that already carries a task marker belongs to the mirror: it is not reported as needing triage, it is mirrored normally, its inbox label is left alone, and managed labels never include the inbox label. An open inbox-labelled issue without a marker is report-only: it is added to the run's claimed-issues set so `adoptReferencedIssues` and every other pass never write to it, logged as `inbox issue <repo>#<N> needs triage: <title>`, and counted in the `<N> inbox issues need triage` sync summary; the same summary clause also appears in `push` mode. It never creates a Backlog task, edits labels or issue bodies, creates markers, creates branches, or pushes for those unmarked inbox issues. After the coordinator triages an inbox issue into normal task work, remove the inbox label from the issue by hand (or add the task marker intentionally); otherwise the unmarked issue will be reported again on every run.
+
+Existing tasks are never updated. `--dry-run` performs no GitHub, Backlog, or git writes.
 
 ## Flags
 
@@ -160,7 +163,7 @@ ArkhamHorror uses the same binary with a temporary or private config, for exampl
   },
   "defaultRepo": "djensenius/ArkhamHorror-Project",
   "mainBranch": "main",
-  "inbox": { "enabled": true, "label": "inbox", "push": true },
+  "inbox": { "enabled": true, "label": "inbox", "mode": "push", "push": true },
   "adoptReferencedIssues": true,
   "labels": {
     "managed": ["backlog", "type:*", "area:*", "priority:*", "upstream-candidate", "roadmap", "owner"],
