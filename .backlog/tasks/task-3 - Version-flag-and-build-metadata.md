@@ -39,4 +39,20 @@ Release archives and Homebrew need `backlog-sync --version` to report what's ins
 
 <!-- SECTION:NOTES:BEGIN -->
 Implemented --version handling before config/git setup, added ldflags-settable main.version/main.commit/main.date defaults, and added TestVersionOutputAndFlagBypassConfig. Verified default and injected outputs with go run plus go test ./... and go vet ./... .
+
+Reviewer follow-up validation:
+- TASK-10 creation and the TASK-6 dependency on TASK-10 are intentional coordinator/user-approved scope from the user-approved distribution/configuration request.
+- `go test ./...`
+  `ok  	github.com/djensenius/backlog-sync	(cached)`
+- `go vet ./...`
+  `(no output)`
+- `go run . --version`
+  `backlog-sync version=dev commit=none date=unknown`
+- `go run -ldflags "-X main.version=v1.2.3 -X main.commit=abc1234 -X main.date=2026-10-01T15:18:00Z" . --version`
+  `backlog-sync version=v1.2.3 commit=abc1234 date=2026-10-01T15:18:00Z`
+- `go test -run TestVersionOutputAndFlagBypassConfig -v .`
+  `=== RUN   TestVersionOutputAndFlagBypassConfig`
+  `--- PASS: TestVersionOutputAndFlagBypassConfig (0.00s)`
+  `PASS`
+  `ok  	github.com/djensenius/backlog-sync	0.144s`
 <!-- SECTION:NOTES:END -->
