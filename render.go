@@ -7,7 +7,23 @@ import (
 	"strings"
 )
 
+type RenderOptions struct {
+	IssueByTaskID map[string]Issue
+	TaskByID      map[string]Task
+	Milestones    map[string]string
+}
+
 func RenderIssueBody(task Task, issueByTaskID map[string]Issue, taskByID map[string]Task) string {
+	return RenderIssueBodyWithOptions(task, RenderOptions{IssueByTaskID: issueByTaskID, TaskByID: taskByID})
+}
+
+func RenderIssueBodyWithOptions(task Task, opts RenderOptions) string {
+	if opts.IssueByTaskID == nil {
+		opts.IssueByTaskID = map[string]Issue{}
+	}
+	if opts.TaskByID == nil {
+		opts.TaskByID = map[string]Task{}
+	}
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "%s\n", MarkerFor(task.ID))
 	fmt.Fprintf(&b, "%s\n\n", mirrorNotice)
@@ -15,12 +31,14 @@ func RenderIssueBody(task Task, issueByTaskID map[string]Issue, taskByID map[str
 	if task.Branch != "" && task.Branch != "main" {
 		fmt.Fprintf(&b, "Branch: %s\n", task.Branch)
 	}
-	fmt.Fprintf(&b, "Parent: %s\n", renderParent(task, issueByTaskID, taskByID))
-	fmt.Fprintf(&b, "Subtasks:\n%s\n", renderTaskRefList(task.Subtasks, issueByTaskID))
-	fmt.Fprintf(&b, "Depends on:\n%s\n", renderDependencyList(task.Dependencies, issueByTaskID, taskByID))
-	fmt.Fprintf(&b, "Milestone: %s\n", stringOrNone(task.Milestone))
+	fmt.Fprintf(&b, "Project: %s\n", stringPtrOrNone(task.Project))
+	fmt.Fprintf(&b, "Milestone: %s\n", milestoneTitle(task.Milestone, opts.Milestones))
+	fmt.Fprintf(&b, "Priority: %s\n", stringPtrOrNone(task.Priority))
+	fmt.Fprintf(&b, "Labels: %s\n", commaOrNone(task.Labels))
 	fmt.Fprintf(&b, "Assignees: %s\n", commaOrNone(task.Assignees))
-	fmt.Fprintf(&b, "Labels: %s\n\n", commaOrNone(task.Labels))
+	fmt.Fprintf(&b, "Parent: %s\n", renderParent(task, opts.IssueByTaskID, opts.TaskByID))
+	fmt.Fprintf(&b, "Depends on:\n%s\n", renderDependencyList(task.Dependencies, opts.IssueByTaskID, opts.TaskByID))
+	fmt.Fprintf(&b, "Subtasks:\n%s\n\n", renderTaskRefList(task.Subtasks, opts.IssueByTaskID))
 	fmt.Fprintf(&b, "## Description\n%s\n\n", blockOrNone(task.Description))
 	fmt.Fprintf(&b, "## Acceptance criteria\n")
 	if len(task.AcceptanceCriteria) == 0 {
@@ -35,6 +53,12 @@ func RenderIssueBody(task Task, issueByTaskID map[string]Issue, taskByID map[str
 			}
 			fmt.Fprintf(&b, "- [%s] %s\n", box, ac.Text)
 		}
+	}
+	if strings.TrimSpace(task.ImplementationPlan) != "" {
+		fmt.Fprintf(&b, "\n## Implementation plan\n%s\n", strings.TrimSpace(task.ImplementationPlan))
+	}
+	if strings.TrimSpace(task.ImplementationNotes) != "" {
+		fmt.Fprintf(&b, "\n## Implementation notes\n%s\n", strings.TrimSpace(task.ImplementationNotes))
 	}
 	if task.FinalSummary != nil && strings.TrimSpace(*task.FinalSummary) != "" {
 		fmt.Fprintf(&b, "\n## Final summary\n%s\n", strings.TrimSpace(*task.FinalSummary))
@@ -105,9 +129,19 @@ func commaOrNone(values []string) string {
 	return strings.Join(values, ", ")
 }
 
-func stringOrNone(value *string) string {
+func stringPtrOrNone(value *string) string {
 	if value == nil || strings.TrimSpace(*value) == "" {
 		return "None"
+	}
+	return *value
+}
+
+func milestoneTitle(value *string, milestones map[string]string) string {
+	if value == nil || strings.TrimSpace(*value) == "" {
+		return "None"
+	}
+	if title := milestones[*value]; title != "" {
+		return title
 	}
 	return *value
 }

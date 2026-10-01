@@ -7,8 +7,8 @@
   <key>ProgramArguments</key>
   <array>
     <string>/Users/david/bin/backlog-sync</string>
-    <string>--root</string>
-    <string>/Users/david/Developer/canadian-ham</string>
+    <string>--config</string>
+    <string>/Users/david/Developer/canadian-ham/.backlog-sync.json</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/Users/david/Developer/canadian-ham</string>

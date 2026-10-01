@@ -14,12 +14,15 @@ type Backlog interface {
 	ListTasks(ctx context.Context, dir string, maxCount, skip int) (TaskListResponse, error)
 	ViewTask(ctx context.Context, dir, id string) (TaskViewResponse, error)
 	Statuses(ctx context.Context, dir string) ([]string, error)
-	CreateTask(ctx context.Context, dir, title, description string, labels []string) (string, error)
+	TaskPrefix(ctx context.Context, dir string) (string, error)
+	Milestones(ctx context.Context, dir string) (map[string]string, error)
+	CreateTask(ctx context.Context, dir string, in CreateTaskInput) (string, error)
+	Push(ctx context.Context, dir, branch string) error
 }
 
 type Git interface {
 	Worktrees(ctx context.Context, root string) ([]Worktree, error)
-	RootBranchClean(ctx context.Context, root string) (bool, string, error)
+	RootBranchClean(ctx context.Context, root, mainBranch string) (bool, string, error)
 }
 
 type GitHub interface {
@@ -27,10 +30,16 @@ type GitHub interface {
 	CreateIssue(ctx context.Context, repo string, title string, body string, labels []string) (Issue, error)
 	UpdateIssue(ctx context.Context, repo string, number int, patch IssuePatch) (Issue, error)
 	EnsureLabel(ctx context.Context, repo, label string) error
-	ProjectInfo(ctx context.Context, owner string, number int) (ProjectInfo, error)
+	ProjectInfo(ctx context.Context, ownerType, owner string, number int) (ProjectInfo, error)
 	ListProjectItems(ctx context.Context, projectID string) ([]ProjectItem, error)
 	AddProjectItem(ctx context.Context, projectID, contentNodeID string) (ProjectItem, error)
 	UpdateProjectStatus(ctx context.Context, projectID, itemID, fieldID, optionID string) error
+	UpdateProjectSingleSelect(ctx context.Context, projectID, itemID, fieldID, optionID string) error
+	UpdateProjectText(ctx context.Context, projectID, itemID, fieldID, text string) error
+	ClearProjectField(ctx context.Context, projectID, itemID, fieldID string) error
+	IssueParent(ctx context.Context, issueNodeID string) (string, error)
+	AddSubIssue(ctx context.Context, parentRepo string, parentNumber int, childDatabaseID int64) error
+	RemoveSubIssue(ctx context.Context, parentNodeID string, childNodeID string) error
 }
 
 func CollectTasks(ctx context.Context, root string, git Git, backlog Backlog, logf func(string, ...any)) (ResolvedTasks, error) {
@@ -109,6 +118,9 @@ func listAllTasks(ctx context.Context, backlog Backlog, dir string) ([]TaskSumma
 		}
 		out = append(out, page.Tasks...)
 		if page.NextSkip == nil {
+			if page.Total != 0 && len(out) != page.Total {
+				return nil, fmt.Errorf("pagination ended with %d tasks but total is %d", len(out), page.Total)
+			}
 			break
 		}
 		if *page.NextSkip <= skip {
@@ -165,7 +177,7 @@ func ResolveTaskCopy(id string, copies []TaskCopy, statusRank map[string]int, ro
 func BranchOwnsTask(id, branch string) bool {
 	id = CanonicalTaskID(id)
 	branch = strings.ToLower(branch)
-	return strings.HasPrefix(branch, id+"-")
+	return branch == id || strings.HasPrefix(branch, id+"-")
 }
 
 func taskTimestamp(task Task) time.Time {

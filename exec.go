@@ -13,27 +13,50 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type CommandRunner interface {
 	Run(ctx context.Context, dir string, name string, args []string, stdin []byte) ([]byte, error)
 }
 
-type OSCommandRunner struct{}
+type OSCommandRunner struct{ Timeout time.Duration }
 
-func (OSCommandRunner) Run(ctx context.Context, dir string, name string, args []string, stdin []byte) ([]byte, error) {
+func (r OSCommandRunner) Run(ctx context.Context, dir string, name string, args []string, stdin []byte) ([]byte, error) {
+	if r.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, r.Timeout)
+		defer cancel()
+	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
+	cmd.Env = scrubBacklogEnv(os.Environ())
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		return stdout.Bytes(), fmt.Errorf("%s %s: timed out after %s", name, strings.Join(args, " "), r.Timeout)
+	}
+	if err != nil {
 		return stdout.Bytes(), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.Bytes(), nil
+}
+
+func scrubBacklogEnv(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, env := range in {
+		key, _, _ := strings.Cut(env, "=")
+		if key == "BACKLOG_CWD" || strings.HasPrefix(key, "BACKLOG_") {
+			continue
+		}
+		out = append(out, env)
+	}
+	return out
 }
 
 type ExecBacklog struct{ Runner CommandRunner }
@@ -82,11 +105,60 @@ func (b ExecBacklog) Statuses(ctx context.Context, dir string) ([]string, error)
 	return statuses, nil
 }
 
-func (b ExecBacklog) CreateTask(ctx context.Context, dir, title, description string, labels []string) (string, error) {
-	args := []string{"task", "create", title, "--plain", "-d", description}
-	for _, label := range labels {
+func (b ExecBacklog) TaskPrefix(ctx context.Context, dir string) (string, error) {
+	for _, key := range []string{"taskPrefix", "task_prefix"} {
+		out, err := b.Runner.Run(ctx, dir, "backlog", []string{"config", "get", key}, nil)
+		if err == nil {
+			prefix := strings.TrimSpace(string(out))
+			if prefix != "" {
+				return strings.ToLower(prefix), nil
+			}
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "backlog", "config.yml"))
+	if err != nil {
+		return "", err
+	}
+	re := regexp.MustCompile(`(?m)^task_prefix:\s*"?([^"\n]+)"?\s*$`)
+	m := re.FindSubmatch(data)
+	if len(m) < 2 {
+		return "", errors.New("task_prefix not found in backlog/config.yml")
+	}
+	return strings.ToLower(strings.TrimSpace(string(m[1]))), nil
+}
+
+func (b ExecBacklog) Milestones(ctx context.Context, dir string) (map[string]string, error) {
+	out, err := b.Runner.Run(ctx, dir, "backlog", []string{"milestone", "list", "--plain"}, nil)
+	if err != nil {
+		return nil, err
+	}
+	return ParseMilestones(string(out)), nil
+}
+
+func ParseMilestones(input string) map[string]string {
+	out := map[string]string{}
+	re := regexp.MustCompile(`^\s*(m-[^:]+):\s*(.*?)\s*(?:\([0-9]+/[0-9]+ done\))?\s*$`)
+	for _, line := range strings.Split(input, "\n") {
+		m := re.FindStringSubmatch(line)
+		if len(m) == 3 {
+			out[m[1]] = strings.TrimSpace(m[2])
+		}
+	}
+	return out
+}
+
+func (b ExecBacklog) CreateTask(ctx context.Context, dir string, in CreateTaskInput) (string, error) {
+	args := []string{"task", "create", "--plain", "-d", in.Description}
+	if in.Project != "" {
+		args = append(args, "--project", in.Project)
+	}
+	for _, ref := range in.References {
+		args = append(args, "--ref", ref)
+	}
+	for _, label := range in.Labels {
 		args = append(args, "-l", label)
 	}
+	args = append(args, "--", in.Title)
 	out, err := b.Runner.Run(ctx, dir, "backlog", args, nil)
 	if err != nil {
 		return "", err
@@ -96,6 +168,19 @@ func (b ExecBacklog) CreateTask(ctx context.Context, dir, title, description str
 		return "", errors.New("created task response did not include task id")
 	}
 	return strings.ToUpper(match), nil
+}
+
+func (b ExecBacklog) Push(ctx context.Context, dir, branch string) error {
+	_, err := b.Runner.Run(ctx, dir, "git", []string{"-C", dir, "push", "origin", branch}, nil)
+	return err
+}
+
+type CreateTaskInput struct {
+	Title       string
+	Description string
+	Labels      []string
+	Project     string
+	References  []string
 }
 
 type ExecGit struct{ Runner CommandRunner }
@@ -108,14 +193,14 @@ func (g ExecGit) Worktrees(ctx context.Context, root string) ([]Worktree, error)
 	return ParseWorktrees(string(out), filepath.Clean(root)), nil
 }
 
-func (g ExecGit) RootBranchClean(ctx context.Context, root string) (bool, string, error) {
+func (g ExecGit) RootBranchClean(ctx context.Context, root, mainBranch string) (bool, string, error) {
 	branchOut, err := g.Runner.Run(ctx, "", "git", []string{"-C", root, "branch", "--show-current"}, nil)
 	if err != nil {
 		return false, "", err
 	}
 	branch := strings.TrimSpace(string(branchOut))
-	if branch != "main" {
-		return false, fmt.Sprintf("root branch is %q, not main", branch), nil
+	if branch != mainBranch {
+		return false, fmt.Sprintf("root branch is %q, not %s", branch, mainBranch), nil
 	}
 	for _, sentinel := range []string{"MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD"} {
 		out, err := g.Runner.Run(ctx, "", "git", []string{"-C", root, "rev-parse", "--git-path", sentinel}, nil)
@@ -132,6 +217,11 @@ func (g ExecGit) RootBranchClean(ctx context.Context, root string) (bool, string
 		if fileExists(path) {
 			return false, fmt.Sprintf("git operation in progress: %s", sentinel), nil
 		}
+	}
+	if out, err := g.Runner.Run(ctx, "", "git", []string{"-C", root, "status", "--porcelain=v1"}, nil); err != nil {
+		return false, "", err
+	} else if strings.TrimSpace(string(out)) != "" {
+		return false, "root worktree or index is dirty", nil
 	}
 	return true, "", nil
 }
@@ -179,14 +269,26 @@ func ParseWorktrees(input string, root string) []Worktree {
 	return out
 }
 
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+func fileExists(path string) bool { _, err := os.Stat(path); return err == nil }
+
+type ExecGitHub struct {
+	Runner       CommandRunner
+	AllowedRepos []string
 }
 
-type ExecGitHub struct{ Runner CommandRunner }
+func (g ExecGitHub) checkRepo(repo string) error {
+	for _, allowed := range g.AllowedRepos {
+		if strings.EqualFold(repo, allowed) {
+			return nil
+		}
+	}
+	return fmt.Errorf("refusing GitHub access to unconfigured repo %s", repo)
+}
 
 func (g ExecGitHub) ListIssues(ctx context.Context, repo string) ([]Issue, error) {
+	if err := g.checkRepo(repo); err != nil {
+		return nil, err
+	}
 	path := fmt.Sprintf("repos/%s/issues?state=all&per_page=100", repo)
 	out, err := g.Runner.Run(ctx, "", "gh", []string{"api", "--paginate", "--slurp", path}, nil)
 	if err != nil {
@@ -200,6 +302,7 @@ func (g ExecGitHub) ListIssues(ctx context.Context, repo string) ([]Issue, error
 	for _, page := range pages {
 		for _, issue := range page {
 			if issue.PullRequest == nil {
+				issue.Repo = repo
 				issues = append(issues, issue)
 			}
 		}
@@ -208,6 +311,9 @@ func (g ExecGitHub) ListIssues(ctx context.Context, repo string) ([]Issue, error
 }
 
 func (g ExecGitHub) CreateIssue(ctx context.Context, repo string, title string, body string, labels []string) (Issue, error) {
+	if err := g.checkRepo(repo); err != nil {
+		return Issue{}, err
+	}
 	payload := map[string]any{"title": title, "body": body, "labels": labels}
 	out, err := g.ghJSON(ctx, []string{"api", "-X", "POST", fmt.Sprintf("repos/%s/issues", repo), "--input", "-"}, payload)
 	if err != nil {
@@ -217,10 +323,14 @@ func (g ExecGitHub) CreateIssue(ctx context.Context, repo string, title string, 
 	if err := json.Unmarshal(out, &issue); err != nil {
 		return Issue{}, err
 	}
+	issue.Repo = repo
 	return issue, nil
 }
 
 func (g ExecGitHub) UpdateIssue(ctx context.Context, repo string, number int, patch IssuePatch) (Issue, error) {
+	if err := g.checkRepo(repo); err != nil {
+		return Issue{}, err
+	}
 	payload := map[string]any{}
 	if patch.Title != nil {
 		payload["title"] = *patch.Title
@@ -245,6 +355,7 @@ func (g ExecGitHub) UpdateIssue(ctx context.Context, repo string, number int, pa
 	if err := json.Unmarshal(out, &issue); err != nil {
 		return Issue{}, err
 	}
+	issue.Repo = repo
 	return issue, nil
 }
 
@@ -252,52 +363,66 @@ func (g ExecGitHub) EnsureLabel(ctx context.Context, repo, label string) error {
 	if label == "" {
 		return nil
 	}
+	if err := g.checkRepo(repo); err != nil {
+		return err
+	}
 	escaped := url.PathEscape(label)
 	_, err := g.Runner.Run(ctx, "", "gh", []string{"api", fmt.Sprintf("repos/%s/labels/%s", repo, escaped)}, nil)
 	if err == nil {
 		return nil
 	}
+	if !strings.Contains(err.Error(), "HTTP 404") && !strings.Contains(err.Error(), "Not Found") {
+		return err
+	}
 	_, err = g.ghJSON(ctx, []string{"api", "-X", "POST", fmt.Sprintf("repos/%s/labels", repo), "--input", "-"}, map[string]any{"name": label, "color": "ededed"})
 	return err
 }
 
-func (g ExecGitHub) ProjectInfo(ctx context.Context, owner string, number int) (ProjectInfo, error) {
-	query := `query($owner:String!, $number:Int!) { user(login:$owner) { projectV2(number:$number) { id fields(first:100) { nodes { ... on ProjectV2SingleSelectField { id name options { id name } } } } } } }`
+func (g ExecGitHub) ProjectInfo(ctx context.Context, ownerType, owner string, number int) (ProjectInfo, error) {
+	ownerField := "user"
+	if ownerType == "org" {
+		ownerField = "organization"
+	}
+	query := fmt.Sprintf(`query($owner:String!, $number:Int!) { %s(login:$owner) { projectV2(number:$number) { id fields(first:100) { nodes { ... on ProjectV2Field { id name dataType } ... on ProjectV2SingleSelectField { id name options { id name } } } } } } }`, ownerField)
 	payload := map[string]any{"query": query, "variables": map[string]any{"owner": owner, "number": number}}
 	out, err := g.ghJSON(ctx, []string{"api", "graphql", "--input", "-"}, payload)
 	if err != nil {
 		return ProjectInfo{}, err
 	}
 	var resp struct {
-		Data struct {
-			User struct {
-				ProjectV2 struct {
-					ID     string `json:"id"`
-					Fields struct {
-						Nodes []struct {
-							ID      string `json:"id"`
-							Name    string `json:"name"`
-							Options []struct {
-								ID   string `json:"id"`
-								Name string `json:"name"`
-							} `json:"options"`
-						} `json:"nodes"`
-					} `json:"fields"`
-				} `json:"projectV2"`
-			} `json:"user"`
+		Data map[string]struct {
+			ProjectV2 struct {
+				ID     string `json:"id"`
+				Fields struct {
+					Nodes []struct {
+						ID       string `json:"id"`
+						Name     string `json:"name"`
+						DataType string `json:"dataType"`
+						Options  []struct {
+							ID   string `json:"id"`
+							Name string `json:"name"`
+						} `json:"options"`
+					} `json:"nodes"`
+				} `json:"fields"`
+			} `json:"projectV2"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
 		return ProjectInfo{}, err
 	}
-	info := ProjectInfo{ID: resp.Data.User.ProjectV2.ID, StatusOptionID: map[string]string{}}
-	for _, field := range resp.Data.User.ProjectV2.Fields.Nodes {
-		if field.Name != "Status" {
-			continue
-		}
-		info.StatusFieldID = field.ID
+	ownerNode := resp.Data[ownerField]
+	info := ProjectInfo{ID: ownerNode.ProjectV2.ID, StatusOptionID: map[string]string{}, Fields: map[string]ProjectField{}}
+	for _, field := range ownerNode.ProjectV2.Fields.Nodes {
+		pf := ProjectField{ID: field.ID, Name: field.Name, DataType: field.DataType, Options: map[string]string{}}
 		for _, option := range field.Options {
-			info.StatusOptionID[option.Name] = option.ID
+			pf.Options[option.Name] = option.ID
+		}
+		info.Fields[field.Name] = pf
+		if field.Name == "Status" {
+			info.StatusFieldID = field.ID
+			for _, option := range field.Options {
+				info.StatusOptionID[option.Name] = option.ID
+			}
 		}
 	}
 	if info.ID == "" || info.StatusFieldID == "" {
@@ -307,7 +432,7 @@ func (g ExecGitHub) ProjectInfo(ctx context.Context, owner string, number int) (
 }
 
 func (g ExecGitHub) ListProjectItems(ctx context.Context, projectID string) ([]ProjectItem, error) {
-	query := `query($project:ID!, $after:String) { node(id:$project) { ... on ProjectV2 { items(first:100, after:$after) { nodes { id content { ... on Issue { id } } fieldValueByName(name:"Status") { ... on ProjectV2ItemFieldSingleSelectValue { name optionId } } } pageInfo { hasNextPage endCursor } } } } }`
+	query := `query($project:ID!, $after:String) { node(id:$project) { ... on ProjectV2 { items(first:100, after:$after) { nodes { id content { ... on Issue { id } } fieldValueByName(name:"Status") { ... on ProjectV2ItemFieldSingleSelectValue { name optionId } } fieldValues(first:100) { nodes { ... on ProjectV2ItemFieldSingleSelectValue { field { ... on ProjectV2FieldCommon { name } } name optionId } ... on ProjectV2ItemFieldTextValue { field { ... on ProjectV2FieldCommon { name } } text } } } } pageInfo { hasNextPage endCursor } } } } }`
 	var items []ProjectItem
 	var after any
 	for {
@@ -329,6 +454,16 @@ func (g ExecGitHub) ListProjectItems(ctx context.Context, projectID string) ([]P
 								Name     string `json:"name"`
 								OptionID string `json:"optionId"`
 							} `json:"fieldValueByName"`
+							FieldValues struct {
+								Nodes []struct {
+									Field *struct {
+										Name string `json:"name"`
+									} `json:"field"`
+									Name     string `json:"name"`
+									OptionID string `json:"optionId"`
+									Text     string `json:"text"`
+								} `json:"nodes"`
+							} `json:"fieldValues"`
 						} `json:"nodes"`
 						PageInfo struct {
 							HasNextPage bool    `json:"hasNextPage"`
@@ -342,13 +477,19 @@ func (g ExecGitHub) ListProjectItems(ctx context.Context, projectID string) ([]P
 			return nil, err
 		}
 		for _, node := range resp.Data.Node.Items.Nodes {
-			item := ProjectItem{ID: node.ID}
+			item := ProjectItem{ID: node.ID, FieldValues: map[string]ProjectFieldValue{}}
 			if node.Content != nil {
 				item.ContentNodeID = node.Content.ID
 			}
 			if node.FieldValueByName != nil {
 				item.Status = node.FieldValueByName.Name
 				item.StatusOptionID = node.FieldValueByName.OptionID
+			}
+			for _, fv := range node.FieldValues.Nodes {
+				if fv.Field == nil {
+					continue
+				}
+				item.FieldValues[fv.Field.Name] = ProjectFieldValue{Name: fv.Name, OptionID: fv.OptionID, Text: fv.Text}
 			}
 			items = append(items, item)
 		}
@@ -381,8 +522,60 @@ func (g ExecGitHub) AddProjectItem(ctx context.Context, projectID, contentNodeID
 }
 
 func (g ExecGitHub) UpdateProjectStatus(ctx context.Context, projectID, itemID, fieldID, optionID string) error {
+	return g.UpdateProjectSingleSelect(ctx, projectID, itemID, fieldID, optionID)
+}
+func (g ExecGitHub) UpdateProjectSingleSelect(ctx context.Context, projectID, itemID, fieldID, optionID string) error {
 	query := `mutation($project:ID!, $item:ID!, $field:ID!, $option:String!) { updateProjectV2ItemFieldValue(input:{projectId:$project, itemId:$item, fieldId:$field, value:{singleSelectOptionId:$option}}) { projectV2Item { id } } }`
 	payload := map[string]any{"query": query, "variables": map[string]any{"project": projectID, "item": itemID, "field": fieldID, "option": optionID}}
+	_, err := g.ghJSON(ctx, []string{"api", "graphql", "--input", "-"}, payload)
+	return err
+}
+func (g ExecGitHub) UpdateProjectText(ctx context.Context, projectID, itemID, fieldID, text string) error {
+	query := `mutation($project:ID!, $item:ID!, $field:ID!, $text:String!) { updateProjectV2ItemFieldValue(input:{projectId:$project, itemId:$item, fieldId:$field, value:{text:$text}}) { projectV2Item { id } } }`
+	payload := map[string]any{"query": query, "variables": map[string]any{"project": projectID, "item": itemID, "field": fieldID, "text": text}}
+	_, err := g.ghJSON(ctx, []string{"api", "graphql", "--input", "-"}, payload)
+	return err
+}
+func (g ExecGitHub) ClearProjectField(ctx context.Context, projectID, itemID, fieldID string) error {
+	query := `mutation($project:ID!, $item:ID!, $field:ID!) { clearProjectV2ItemFieldValue(input:{projectId:$project, itemId:$item, fieldId:$field}) { projectV2Item { id } } }`
+	payload := map[string]any{"query": query, "variables": map[string]any{"project": projectID, "item": itemID, "field": fieldID}}
+	_, err := g.ghJSON(ctx, []string{"api", "graphql", "--input", "-"}, payload)
+	return err
+}
+func (g ExecGitHub) IssueParent(ctx context.Context, issueNodeID string) (string, error) {
+	query := `query($id:ID!) { node(id:$id) { ... on Issue { parent { id } } } }`
+	payload := map[string]any{"query": query, "variables": map[string]any{"id": issueNodeID}}
+	out, err := g.ghJSON(ctx, []string{"api", "graphql", "--input", "-"}, payload)
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		Data struct {
+			Node struct {
+				Parent *struct {
+					ID string `json:"id"`
+				} `json:"parent"`
+			} `json:"node"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		return "", err
+	}
+	if resp.Data.Node.Parent == nil {
+		return "", nil
+	}
+	return resp.Data.Node.Parent.ID, nil
+}
+func (g ExecGitHub) AddSubIssue(ctx context.Context, parentRepo string, parentNumber int, childDatabaseID int64) error {
+	if err := g.checkRepo(parentRepo); err != nil {
+		return err
+	}
+	_, err := g.ghJSON(ctx, []string{"api", "-X", "POST", fmt.Sprintf("repos/%s/issues/%d/sub_issues", parentRepo, parentNumber), "--input", "-"}, map[string]any{"sub_issue_id": childDatabaseID})
+	return err
+}
+func (g ExecGitHub) RemoveSubIssue(ctx context.Context, parentNodeID string, childNodeID string) error {
+	query := `mutation($parent:ID!, $child:ID!) { removeSubIssue(input:{issueId:$parent, subIssueId:$child}) { issue { id } } }`
+	payload := map[string]any{"query": query, "variables": map[string]any{"parent": parentNodeID, "child": childNodeID}}
 	_, err := g.ghJSON(ctx, []string{"api", "graphql", "--input", "-"}, payload)
 	return err
 }
