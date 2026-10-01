@@ -166,12 +166,19 @@ func DiscoverBacklogDir(root string) (string, bool, error) {
 	// backlog.config.yml backlog_directory, then backlog/, then .backlog/.
 	// Do not recursively search nested config files; the syncer invokes the CLI
 	// from wt.Path, and the CLI would not resolve those nested folders either.
-	if path, ok, err := discoverBacklogDirFromRootConfig(root); err != nil || ok {
+	resolvedRoot, err := evalSymlinksAbs(root)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve worktree root %s: %w", root, err)
+	}
+	if path, ok, err := discoverBacklogDirFromRootConfig(root, resolvedRoot); err != nil || ok {
 		return path, ok, err
 	}
 	for _, rel := range []string{"backlog", ".backlog"} {
 		path := filepath.Join(root, rel)
 		if isBacklogDataDir(path) {
+			if err := requireInsideResolvedWorktree(resolvedRoot, path, fmt.Sprintf("Backlog directory %q", rel)); err != nil {
+				return "", false, err
+			}
 			return path, true, nil
 		}
 	}
@@ -180,7 +187,7 @@ func DiscoverBacklogDir(root string) (string, bool, error) {
 
 const rootBacklogConfigFile = "backlog.config.yml"
 
-func discoverBacklogDirFromRootConfig(root string) (string, bool, error) {
+func discoverBacklogDirFromRootConfig(root, resolvedRoot string) (string, bool, error) {
 	configPath := filepath.Join(root, rootBacklogConfigFile)
 	data, err := os.ReadFile(configPath)
 	if os.IsNotExist(err) {
@@ -214,7 +221,37 @@ func discoverBacklogDirFromRootConfig(root string) (string, bool, error) {
 	if !info.IsDir() {
 		return "", false, fmt.Errorf("%s backlog_directory target %q is not a directory", configPath, rel)
 	}
+	if err := requireInsideResolvedWorktree(resolvedRoot, path, fmt.Sprintf("%s backlog_directory target %q", configPath, rel)); err != nil {
+		return "", false, err
+	}
 	return path, true, nil
+}
+
+func evalSymlinksAbs(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(abs)
+}
+
+func requireInsideResolvedWorktree(resolvedRoot, candidate, description string) error {
+	resolvedCandidate, err := evalSymlinksAbs(candidate)
+	if err != nil {
+		return fmt.Errorf("resolve %s %s: %w", description, candidate, err)
+	}
+	if !pathWithin(resolvedRoot, resolvedCandidate) {
+		return fmt.Errorf("%s must stay inside the worktree: %q resolves to %q outside %q", description, candidate, resolvedCandidate, resolvedRoot)
+	}
+	return nil
+}
+
+func pathWithin(root, candidate string) bool {
+	rel, err := filepath.Rel(root, candidate)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel))
 }
 
 func parseRootConfigValue(data []byte, name string) (string, bool, error) {

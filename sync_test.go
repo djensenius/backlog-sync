@@ -646,6 +646,90 @@ func TestDiscoverBacklogDirRootConfigMissingTargetErrors(t *testing.T) {
 	}
 }
 
+func TestDiscoverBacklogDirRejectsSymlinkedBacklogDirOutsideWorktree(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		rel             string
+		writeRootConfig bool
+	}{
+		{name: "root config", rel: "custom", writeRootConfig: true},
+		{name: "backlog", rel: "backlog"},
+		{name: ".backlog", rel: ".backlog"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			outside := filepath.Join(t.TempDir(), "external-backlog")
+			makeBacklogDataDir(t, outside)
+			if err := os.Symlink(outside, filepath.Join(root, tc.rel)); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+			if tc.writeRootConfig {
+				if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("backlog_directory: "+tc.rel+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			got, ok, err := DiscoverBacklogDir(root)
+			if err == nil || ok {
+				t.Fatalf("DiscoverBacklogDir=%q %v err=%v, want containment error", got, ok, err)
+			}
+			if !strings.Contains(err.Error(), "must stay inside the worktree") {
+				t.Fatalf("error should explain containment failure, got %v", err)
+			}
+		})
+	}
+}
+
+func TestDiscoverBacklogDirAcceptsSymlinkedBacklogDirInsideWorktree(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		rel             string
+		writeRootConfig bool
+	}{
+		{name: "root config", rel: "custom", writeRootConfig: true},
+		{name: "backlog", rel: "backlog"},
+		{name: ".backlog", rel: ".backlog"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			target := filepath.Join(root, "actual-backlog")
+			makeBacklogDataDir(t, target)
+			want := filepath.Join(root, tc.rel)
+			if err := os.Symlink(target, want); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+			if tc.writeRootConfig {
+				if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("backlog_directory: "+tc.rel+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			got, ok, err := DiscoverBacklogDir(root)
+			if err != nil || !ok || got != want {
+				t.Fatalf("DiscoverBacklogDir=%q %v err=%v, want %q true nil", got, ok, err, want)
+			}
+		})
+	}
+}
+
+func TestDiscoverBacklogDirAllowsWorktreeReachedThroughSymlinkedParent(t *testing.T) {
+	base := t.TempDir()
+	realParent := filepath.Join(base, "real-parent")
+	realRoot := filepath.Join(realParent, "repo")
+	makeBacklogDataDir(t, filepath.Join(realRoot, "backlog"))
+	linkParent := filepath.Join(base, "link-parent")
+	if err := os.Symlink(realParent, linkParent); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	rootViaLink := filepath.Join(linkParent, "repo")
+	want := filepath.Join(rootViaLink, "backlog")
+
+	got, ok, err := DiscoverBacklogDir(rootViaLink)
+	if err != nil || !ok || got != want {
+		t.Fatalf("DiscoverBacklogDir=%q %v err=%v, want %q true nil", got, ok, err, want)
+	}
+}
+
 func TestCollectTasksDiscoversBuiltInAndRootConfigBacklogDirs(t *testing.T) {
 	root := t.TempDir()
 	hidden := t.TempDir()
