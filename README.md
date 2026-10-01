@@ -139,13 +139,14 @@ All log lines are written to stdout with an RFC3339 timestamp prefix. Flag error
 
 ## Install, build, and dry run
 
-Release archives are published on the [GitHub Releases page](https://github.com/djensenius/backlog-sync/releases) for tagged versions. Download the archive for your OS/architecture plus `checksums.txt`, verify the archive checksum, then extract the binary:
+Tagged versions create draft GitHub releases. After a draft is published, download the archive for your OS/architecture from the [GitHub Releases page](https://github.com/djensenius/backlog-sync/releases) plus `checksums.txt`, verify the archive checksum, then extract the binary:
 
 ```bash
 version=v0.1.0
 asset="backlog-sync_${version#v}_darwin_arm64.tar.gz"
 gh release download "$version" --repo djensenius/backlog-sync --pattern "$asset" --pattern checksums.txt
 grep "  ${asset}$" checksums.txt | shasum -a 256 -c -
+# Linux: grep "  ${asset}$" checksums.txt | sha256sum -c -
 tar -xzf "$asset"
 ./backlog-sync --version
 ./backlog-sync --config /path/to/repo/.backlog-sync.json --dry-run
