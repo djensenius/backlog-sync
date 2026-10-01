@@ -51,6 +51,20 @@ archives:
           group: root
           mode: 0644
           mtime: "{{ .CommitDate }}"
+      - src: examples/minimal-single-repo.json
+        dst: examples/minimal-single-repo.json
+        info:
+          owner: root
+          group: root
+          mode: 0644
+          mtime: "{{ .CommitDate }}"
+      - src: examples/multi-repo.json
+        dst: examples/multi-repo.json
+        info:
+          owner: root
+          group: root
+          mode: 0644
+          mtime: "{{ .CommitDate }}"
       - src: install-launchd.sh
         dst: install-launchd.sh
         info:

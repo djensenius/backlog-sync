@@ -26,10 +26,11 @@ func TestSampleConfigsParseStrictlyWithoutNetwork(t *testing.T) {
 				t.Fatalf("sample must be pure JSON: %s", sample.path)
 			}
 
-			var raw any
+			var raw map[string]any
 			if err := json.Unmarshal(data, &raw); err != nil {
 				t.Fatalf("unmarshal sample for placeholder checks: %v", err)
 			}
+			assertOmittedRootOnlyKeys(t, sample.path, raw)
 			assertNoConsumerSpecificValues(t, sample.path, raw)
 
 			root := t.TempDir()
@@ -47,6 +48,37 @@ func TestSampleConfigsParseStrictlyWithoutNetwork(t *testing.T) {
 				t.Fatalf("sample should use placeholder owner/repo values, got projectOwner=%q defaultRepo=%q", cfg.ProjectOwner, cfg.DefaultRepo)
 			}
 		})
+	}
+}
+
+func TestLoadConfigRejectsUnknownFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{
+  "projectOwner": "OWNER_LOGIN",
+  "projectOwnerType": "user",
+  "projectNumber": 1,
+  "defaultRepo": "OWNER_LOGIN/REPOSITORY_NAME",
+  "mainBranch": "main",
+  "unexpectedField": true
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadConfig(path)
+	if err == nil {
+		t.Fatal("loadConfig accepted an unknown field")
+	}
+	if !strings.Contains(err.Error(), "unknown field") || !strings.Contains(err.Error(), "unexpectedField") {
+		t.Fatalf("loadConfig error %q, want unknown field unexpectedField", err)
+	}
+}
+
+func assertOmittedRootOnlyKeys(t *testing.T, samplePath string, raw map[string]any) {
+	t.Helper()
+	for _, key := range []string{"root", "lockFile"} {
+		if _, ok := raw[key]; ok {
+			t.Fatalf("%s should omit %q so consumers do not copy environment-specific paths", samplePath, key)
+		}
 	}
 }
 

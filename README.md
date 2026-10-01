@@ -23,7 +23,7 @@ Config fields:
 - `statusMap` optionally maps Backlog status names to GitHub Project Status option names; omitted entries use identity mapping.
 - `inbox` controls import/reporting for open issues carrying the configured inbox label. Use `mode: "manual"` for report-only triage and `mode: "push"` only when direct commits to the Backlog branch are allowed.
 - `adoptReferencedIssues` lets unmirrored tasks claim an existing referenced issue in the task's target repo.
-- `labels.managed` limits which Backlog labels the mirror may add or remove; `labels.managed: ["*"]` allows every Backlog task label. The configured inbox label is never part of the mirror label set.
+- `labels.managed` limits which Backlog labels the mirror may add and which existing issue labels may be removed. `labels.managed: ["*"]` adds any Backlog task label, but `*` does not remove labels from issues; configure explicit label names or prefixes such as `type:*` for labels the mirror may remove. The configured inbox label is never part of the mirror label set.
 - `labels.addAlways` adds labels that are also covered by `labels.managed`; `labels.priorityPrefix` controls generated priority labels.
 - `fields` names optional GitHub Project fields to update when they exist.
 - `subIssues` enables parent/child issue links for Backlog subtasks.
@@ -56,7 +56,7 @@ All GitHub issue calls use explicit REST/GraphQL paths and are wrapped by an all
 - Titles are exactly `task-N: <title>`.
 - Issues without a marker are not modified, except for `inbox` imports and explicit `adoptReferencedIssues` adoption.
 - Duplicate markers use the lowest-numbered issue and log a warning.
-- Managed labels are compared case-insensitively. Desired labels are `(task labels ∩ managed) ∪ addAlways ∪ priority label`; only managed labels are removed. Unmanaged labels and the inbox label are preserved.
+- Managed labels are compared case-insensitively. Desired labels are `(task labels ∩ managed) ∪ addAlways ∪ priority label`; only labels matching explicit managed names or prefixes are removed. The wildcard `*` adds any Backlog task label but does not remove issue labels. Unmanaged labels and the inbox label are preserved.
 - Missing desired labels are created per repo with neutral colour `ededed`.
 - `Done` tasks are closed with `state_reason: completed`; other statuses are opened/reopened.
 - Project Status is set through GraphQL using the configured `statusMap` or identity mapping.
@@ -102,7 +102,7 @@ All log lines are written to stdout with an RFC3339 timestamp prefix. Flag error
 
 ## Install, build, and dry run
 
-Tagged versions create draft GitHub releases. After a draft is published, download the archive for your OS/architecture from the [GitHub Releases page](https://github.com/djensenius/backlog-sync/releases) plus `checksums.txt`, verify the archive checksum, then extract the binary:
+Tagged versions create draft GitHub releases. Each release archive contains the `backlog-sync` binary, `README.md`, `LICENSE`, the sample configs in `examples/`, `install-launchd.sh`, and `launchd/backlog-sync.plist.template`. After a draft is published, download the archive for your OS/architecture from the [GitHub Releases page](https://github.com/djensenius/backlog-sync/releases) plus `checksums.txt`, verify the archive checksum, then extract the binary:
 
 ```bash
 version=v0.1.0
