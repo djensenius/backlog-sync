@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@pi'
 created_date: '2026-10-01 15:18'
-updated_date: '2026-10-01 16:45'
+updated_date: '2026-10-01 16:46'
 labels:
   - cli
 milestone: m-0
@@ -56,3 +56,9 @@ Reviewer follow-up validation:
   `PASS`
   `ok  	github.com/djensenius/backlog-sync	0.144s`
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added `--version` output with ldflags-settable `main.version`, `main.commit`, and `main.date`; verified defaults, injected metadata, and the dedicated version test with `go test ./...`, `go vet ./...`, `go run . --version`, `go run -ldflags "-X main.version=v1.2.3 -X main.commit=abc1234 -X main.date=2026-10-01T15:18:00Z" . --version`, and `go test -run TestVersionOutputAndFlagBypassConfig -v .`.
+<!-- SECTION:FINAL_SUMMARY:END -->
