@@ -295,8 +295,33 @@ func (g ExecGit) Fetch(ctx context.Context, root, remote, branch string) error {
 	return err
 }
 
-func (g ExecGit) AddWorktree(ctx context.Context, root, path, branch, startPoint string) error {
-	_, err := g.Runner.Run(ctx, "", "git", []string{"-C", root, "worktree", "add", "-b", branch, path, startPoint}, nil)
+func (g ExecGit) PruneWorktrees(ctx context.Context, root string) error {
+	_, err := g.Runner.Run(ctx, "", "git", []string{"-C", root, "worktree", "prune"}, nil)
+	return err
+}
+
+func (g ExecGit) RemoteBranchExists(ctx context.Context, root, remote, branch string) (bool, error) {
+	out, err := g.Runner.Run(ctx, "", "git", []string{"-C", root, "ls-remote", "--heads", remote, "refs/heads/" + branch}, nil)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(string(out)) != "", nil
+}
+
+func (g ExecGit) DeleteLocalBranch(ctx context.Context, root, branch string) error {
+	out, err := g.Runner.Run(ctx, "", "git", []string{"-C", root, "branch", "--list", branch}, nil)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		return nil
+	}
+	_, err = g.Runner.Run(ctx, "", "git", []string{"-C", root, "branch", "-D", branch}, nil)
+	return err
+}
+
+func (g ExecGit) AddWorktree(ctx context.Context, root, path, startPoint string) error {
+	_, err := g.Runner.Run(ctx, "", "git", []string{"-C", root, "worktree", "add", "--detach", path, startPoint}, nil)
 	return err
 }
 
@@ -305,8 +330,16 @@ func (g ExecGit) RemoveWorktree(ctx context.Context, root, path string) error {
 	return err
 }
 
+func (g ExecGit) WorktreeHasChanges(ctx context.Context, dir string) (bool, error) {
+	out, err := g.Runner.Run(ctx, "", "git", []string{"--no-optional-locks", "-C", dir, "status", "--porcelain=v1"}, nil)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(string(out)) != "", nil
+}
+
 func (g ExecGit) PushBranch(ctx context.Context, dir, branch string) error {
-	_, err := g.Runner.Run(ctx, "", "git", []string{"-C", dir, "push", "-u", "origin", branch}, nil)
+	_, err := g.Runner.Run(ctx, "", "git", []string{"-C", dir, "push", "--force-with-lease", "origin", "HEAD:refs/heads/" + branch}, nil)
 	return err
 }
 
@@ -643,17 +676,41 @@ func (g ExecGitHub) RemoveSubIssue(ctx context.Context, parentNodeID string, chi
 	return err
 }
 
-func (g ExecGitHub) ListOpenPullRequests(ctx context.Context, repo string) ([]PullRequest, error) {
+func (g ExecGitHub) ListOpenPullRequests(ctx context.Context, repo, head, marker string) ([]PullRequest, error) {
 	if err := g.checkRepo(repo); err != nil {
 		return nil, err
 	}
-	out, err := g.Runner.Run(ctx, "", "gh", []string{"pr", "list", "--repo", repo, "--state", "open", "--json", "number,url,title,body,headRefName", "--limit", "100"}, nil)
-	if err != nil {
-		return nil, err
-	}
+	fields := "number,url,title,body,headRefName"
 	var prs []PullRequest
-	if err := json.Unmarshal(out, &prs); err != nil {
-		return nil, err
+	if head != "" {
+		out, err := g.Runner.Run(ctx, "", "gh", []string{"pr", "list", "--repo", repo, "--state", "open", "--head", head, "--json", fields}, nil)
+		if err != nil {
+			return nil, err
+		}
+		var byHead []PullRequest
+		if err := json.Unmarshal(out, &byHead); err != nil {
+			return nil, err
+		}
+		prs = append(prs, byHead...)
+	}
+	if marker != "" {
+		out, err := g.Runner.Run(ctx, "", "gh", []string{"pr", "list", "--repo", repo, "--state", "open", "--search", marker, "--json", fields}, nil)
+		if err != nil {
+			return nil, err
+		}
+		var byMarker []PullRequest
+		if err := json.Unmarshal(out, &byMarker); err != nil {
+			return nil, err
+		}
+		seen := map[string]bool{}
+		for _, pr := range prs {
+			seen[pr.URL] = true
+		}
+		for _, pr := range byMarker {
+			if !seen[pr.URL] {
+				prs = append(prs, pr)
+			}
+		}
 	}
 	return prs, nil
 }

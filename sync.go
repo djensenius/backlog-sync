@@ -519,9 +519,6 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 				if created {
 					imported++
 				}
-				if err := a.stripInboxLabel(ctx, cfg, issue); err != nil {
-					return imported, linked, err
-				}
 				continue
 			case InboxModePush:
 				description := strings.TrimSpace(issue.Body)
@@ -573,7 +570,15 @@ func (a *App) ensureInboxPullRequest(ctx context.Context, cfg Config, issue Issu
 	}
 	branch := inboxBranchName(issue)
 	marker := inboxPRMarker(issue)
-	prs, err := a.GitHub.ListOpenPullRequests(ctx, rootRepo)
+	if !cfg.DryRun {
+		if err := a.Git.PruneWorktrees(ctx, cfg.Root); err != nil {
+			return false, err
+		}
+		if err := a.Git.DeleteLocalBranch(ctx, cfg.Root, branch); err != nil {
+			return false, err
+		}
+	}
+	prs, err := a.GitHub.ListOpenPullRequests(ctx, rootRepo, branch, marker)
 	if err != nil {
 		return false, err
 	}
@@ -585,18 +590,79 @@ func (a *App) ensureInboxPullRequest(ctx context.Context, cfg Config, issue Issu
 		a.Logf("would create task from %s#%d on branch %s and open PR in %s", issue.Repo, issue.Number, branch, rootRepo)
 		return false, nil
 	}
+	remoteBranchExists, err := a.Git.RemoteBranchExists(ctx, cfg.Root, "origin", branch)
+	if err != nil {
+		return false, err
+	}
+	if remoteBranchExists {
+		if err := a.openInboxPullRequestFromExistingBranch(ctx, cfg, rootRepo, branch, issue, issueURL); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
 	if err := a.Git.Fetch(ctx, cfg.Root, "origin", cfg.MainBranch); err != nil {
 		return false, err
 	}
-	tmpParent, err := os.MkdirTemp("", "backlog-sync-inbox-*")
+	taskID, err := a.withInboxWorktree(ctx, cfg.Root, "origin/"+cfg.MainBranch, func(tmp string) (string, error) {
+		description := strings.TrimSpace(issue.Body)
+		project := cfg.ProjectForRepo(issue.Repo)
+		taskID, err := a.Backlog.CreateTask(ctx, tmp, CreateTaskInput{Title: issue.Title, Description: description, Labels: []string{}, Project: project, References: []string{issueURL}, TaskPrefix: cfg.TaskPrefix})
+		if err != nil {
+			return "", err
+		}
+		dirty, err := a.Git.WorktreeHasChanges(ctx, tmp)
+		if err != nil {
+			return "", err
+		}
+		if dirty {
+			return "", fmt.Errorf("backlog task create left uncommitted changes in temporary worktree; enable Backlog autoCommit for inbox pr mode")
+		}
+		if err := a.Git.PushBranch(ctx, tmp, branch); err != nil {
+			return "", err
+		}
+		return taskID, nil
+	})
 	if err != nil {
 		return false, err
+	}
+	if err := a.Git.DeleteLocalBranch(ctx, cfg.Root, branch); err != nil {
+		return false, err
+	}
+	if err := a.createInboxPullRequest(ctx, cfg, rootRepo, branch, issue, issueURL, taskID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (a *App) openInboxPullRequestFromExistingBranch(ctx context.Context, cfg Config, rootRepo, branch string, issue Issue, issueURL string) error {
+	if err := a.Git.Fetch(ctx, cfg.Root, "origin", branch); err != nil {
+		return err
+	}
+	taskID, err := a.withInboxWorktree(ctx, cfg.Root, "origin/"+branch, func(tmp string) (string, error) {
+		return a.findTaskIDByReferenceInWorktree(ctx, tmp, issueURL)
+	})
+	if err != nil {
+		return err
+	}
+	if taskID == "" {
+		return fmt.Errorf("remote inbox branch %s exists but no Backlog task references %s", branch, issueURL)
+	}
+	if err := a.Git.DeleteLocalBranch(ctx, cfg.Root, branch); err != nil {
+		return err
+	}
+	return a.createInboxPullRequest(ctx, cfg, rootRepo, branch, issue, issueURL, taskID)
+}
+
+func (a *App) withInboxWorktree(ctx context.Context, root, startPoint string, fn func(tmp string) (string, error)) (result string, err error) {
+	tmpParent, err := os.MkdirTemp("", "backlog-sync-inbox-*")
+	if err != nil {
+		return "", err
 	}
 	tmp := filepath.Join(tmpParent, "worktree")
 	worktreeAdded := false
 	defer func() {
 		if worktreeAdded {
-			if removeErr := a.Git.RemoveWorktree(ctx, cfg.Root, tmp); removeErr != nil && err == nil {
+			if removeErr := a.Git.RemoveWorktree(ctx, root, tmp); removeErr != nil && err == nil {
 				err = removeErr
 			}
 		}
@@ -604,27 +670,41 @@ func (a *App) ensureInboxPullRequest(ctx context.Context, cfg Config, issue Issu
 			err = removeErr
 		}
 	}()
-	if err := a.Git.AddWorktree(ctx, cfg.Root, tmp, branch, "origin/"+cfg.MainBranch); err != nil {
-		return false, err
+	if err := a.Git.AddWorktree(ctx, root, tmp, startPoint); err != nil {
+		return "", err
 	}
 	worktreeAdded = true
-	description := strings.TrimSpace(issue.Body)
-	project := cfg.ProjectForRepo(issue.Repo)
-	taskID, err := a.Backlog.CreateTask(ctx, tmp, CreateTaskInput{Title: issue.Title, Description: description, Labels: []string{}, Project: project, References: []string{issueURL}, TaskPrefix: cfg.TaskPrefix})
+	return fn(tmp)
+}
+
+func (a *App) findTaskIDByReferenceInWorktree(ctx context.Context, dir, issueURL string) (string, error) {
+	summaries, err := listAllTasks(ctx, a.Backlog, dir)
 	if err != nil {
-		return false, err
+		return "", err
 	}
-	if err := a.Git.PushBranch(ctx, tmp, branch); err != nil {
-		return false, err
+	for _, summary := range summaries {
+		view, err := a.Backlog.ViewTask(ctx, dir, summary.ID)
+		if err != nil {
+			return "", err
+		}
+		for _, ref := range view.Task.References {
+			if strings.EqualFold(ref, issueURL) {
+				return view.Task.ID, nil
+			}
+		}
 	}
+	return "", nil
+}
+
+func (a *App) createInboxPullRequest(ctx context.Context, cfg Config, rootRepo, branch string, issue Issue, issueURL, taskID string) error {
 	title := fmt.Sprintf("%s: %s", CanonicalTaskID(taskID), issue.Title)
 	body := inboxPRBody(issue, issueURL)
 	pr, err := a.GitHub.CreatePullRequest(ctx, rootRepo, branch, cfg.MainBranch, title, body)
 	if err != nil {
-		return false, err
+		return err
 	}
 	a.Logf("created inbox PR %s for issue %s#%d", pr.URL, issue.Repo, issue.Number)
-	return true, nil
+	return nil
 }
 
 func inboxBranchName(issue Issue) string {

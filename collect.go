@@ -25,8 +25,12 @@ type Git interface {
 	RootBranchClean(ctx context.Context, root, mainBranch string) (bool, string, error)
 	RemoteRepo(ctx context.Context, root, remote string) (string, error)
 	Fetch(ctx context.Context, root, remote, branch string) error
-	AddWorktree(ctx context.Context, root, path, branch, startPoint string) error
+	PruneWorktrees(ctx context.Context, root string) error
+	RemoteBranchExists(ctx context.Context, root, remote, branch string) (bool, error)
+	DeleteLocalBranch(ctx context.Context, root, branch string) error
+	AddWorktree(ctx context.Context, root, path, startPoint string) error
 	RemoveWorktree(ctx context.Context, root, path string) error
+	WorktreeHasChanges(ctx context.Context, dir string) (bool, error)
 	PushBranch(ctx context.Context, dir, branch string) error
 }
 
@@ -45,7 +49,7 @@ type GitHub interface {
 	IssueParent(ctx context.Context, issueNodeID string) (IssueParentInfo, error)
 	AddSubIssue(ctx context.Context, parentRepo string, parentNumber int, childDatabaseID int64) error
 	RemoveSubIssue(ctx context.Context, parentNodeID string, childNodeID string) error
-	ListOpenPullRequests(ctx context.Context, repo string) ([]PullRequest, error)
+	ListOpenPullRequests(ctx context.Context, repo, head, marker string) ([]PullRequest, error)
 	CreatePullRequest(ctx context.Context, repo, head, base, title, body string) (PullRequest, error)
 }
 
@@ -62,7 +66,13 @@ func CollectTasks(ctx context.Context, cfg Config, git Git, backlog Backlog, log
 			continue
 		}
 		if dir, ok, err := DiscoverBacklogDir(wt.Path); err != nil {
-			return ResolvedTasks{}, fmt.Errorf("discover Backlog directory in %s: %w", wt.Path, err)
+			if wt.IsRoot {
+				return ResolvedTasks{}, fmt.Errorf("discover Backlog directory in main worktree %s: %w", wt.Path, err)
+			}
+			if logf != nil {
+				logf("skip worktree with ambiguous Backlog directory %s: %v", wt.Path, err)
+			}
+			continue
 		} else if !ok {
 			if logf != nil {
 				logf("skip worktree without Backlog config: %s", wt.Path)
@@ -153,10 +163,25 @@ func shouldSkipWorktree(wt Worktree) bool {
 	if wt.Path == "" || wt.Bare || wt.Prunable || wt.Missing {
 		return true
 	}
+	if isTempInboxWorktreePath(wt.Path) {
+		return true
+	}
 	if _, err := os.Stat(wt.Path); err != nil {
 		return true
 	}
 	return false
+}
+
+func isTempInboxWorktreePath(path string) bool {
+	tmp := filepath.Clean(os.TempDir())
+	clean := filepath.Clean(path)
+	rel, err := filepath.Rel(tmp, clean)
+	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || rel == ".." {
+		return false
+	}
+	first := strings.Split(rel, string(os.PathSeparator))[0]
+	matched, err := filepath.Match("backlog-sync-inbox-*", first)
+	return err == nil && matched
 }
 
 func DiscoverBacklogDir(root string) (string, bool, error) {

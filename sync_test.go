@@ -466,14 +466,17 @@ func TestInboxPRModeCreatesPullRequestInTemporaryWorktree(t *testing.T) {
 	if c.Imported != 1 || len(bl.created) != 1 || len(bl.createDirs) != 1 || bl.createDirs[0] == root {
 		t.Fatalf("expected one task created in temp worktree, counters=%+v dirs=%v", c, bl.createDirs)
 	}
-	if git.fetches != 1 || len(git.addedWorktrees) != 1 || len(git.removedWorktrees) != 1 || git.addedWorktrees[0] != git.removedWorktrees[0] || len(git.pushedBranches) != 1 {
+	if git.prunes != 1 || len(git.deletedLocalBranches) < 2 || git.fetches != 1 || len(git.addedWorktrees) != 1 || len(git.removedWorktrees) != 1 || git.addedWorktrees[0] != git.removedWorktrees[0] || len(git.pushedBranches) != 1 {
 		t.Fatalf("temporary worktree/push flow not recorded: %+v", git)
 	}
-	if git.pushedBranches[0] != "inbox/owner-repo-77" || len(gh.createdPullRequests) != 1 || !strings.HasPrefix(gh.createdPullRequests[0].Title, "task-77:") {
-		t.Fatalf("bad PR creation branch=%v prs=%+v", git.pushedBranches, gh.createdPullRequests)
+	if got := git.worktreeStartPoints[0]; got != "origin/main" {
+		t.Fatalf("temp worktree start point = %q, want origin/main", got)
 	}
-	if got := gh.issues["owner/repo"][0]; hasLabelFold(got, "inbox") || strings.HasPrefix(got.Body, "<!-- backlog:") {
-		t.Fatalf("PR mode should unlabel without marking issue as mirrored before merge: %+v", got)
+	if git.pushedBranches[0] != "inbox/owner-repo-77" || len(gh.createdPullRequests) != 1 || !strings.HasPrefix(gh.createdPullRequests[0].Title, "task-77:") || gh.createdPullRequestBases[0] != "main" {
+		t.Fatalf("bad PR creation branch=%v bases=%v prs=%+v", git.pushedBranches, gh.createdPullRequestBases, gh.createdPullRequests)
+	}
+	if got := gh.issues["owner/repo"][0]; !hasLabelFold(got, "inbox") || strings.HasPrefix(got.Body, "<!-- backlog:") {
+		t.Fatalf("PR mode should keep inbox label without marking issue as mirrored before merge: %+v", got)
 	}
 	if bl.pushed {
 		t.Fatalf("PR mode must not push main through backlog push")
@@ -508,10 +511,146 @@ func TestInboxPRModeReplayFindsExistingPRByBranchOrMarker(t *testing.T) {
 			if c.Imported != 0 || len(bl.created) != 0 || len(gh.createdPullRequests) != 0 || len(git.addedWorktrees) != 0 || git.fetches != 0 {
 				t.Fatalf("replay should not create a second PR/task/worktree counters=%+v creates=%d prs=%d git=%+v", c, len(bl.created), len(gh.createdPullRequests), git)
 			}
-			if got := gh.issues["owner/repo"][0]; hasLabelFold(got, "inbox") {
-				t.Fatalf("replay should still remove inbox label: %+v", got)
+			if gh.prListHeads[0] != "inbox/owner-repo-88" || gh.prListMarkers[0] != inboxPRMarker(inbox) {
+				t.Fatalf("PR lookup should use head and marker, heads=%v markers=%v", gh.prListHeads, gh.prListMarkers)
+			}
+			if got := gh.issues["owner/repo"][0]; !hasLabelFold(got, "inbox") {
+				t.Fatalf("replay should keep inbox label while PR is open: %+v", got)
 			}
 		})
+	}
+}
+
+func TestInboxPRModeMergeLinksOriginalIssueWithoutDuplicate(t *testing.T) {
+	ctx := context.Background()
+	root := tempRoot(t)
+	merged := sampleTask()
+	merged.ID = "TASK-91"
+	merged.ParentTaskID = nil
+	merged.References = []string{"https://github.com/owner/repo/issues/91"}
+	inbox := Issue{Number: 91, DatabaseID: 91, NodeID: "I_91", HTMLURL: "https://github.com/owner/repo/issues/91", Title: "Merged inbox", Body: "body", State: "open", Repo: "owner/repo", Labels: []IssueLabel{{Name: "inbox"}}}
+	bl := newFakeBacklog(root, merged)
+	gh := basicGH(map[string][]Issue{"owner/repo": {inbox}})
+	git := &recordingGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}}, remoteRepo: "owner/repo"}
+	cfg := testConfig(root)
+	cfg.Inbox.Mode = InboxModePR
+	app := App{Git: git, Backlog: bl, GitHub: gh, Logf: func(string, ...any) {}}
+	if _, err := app.Run(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(bl.created) != 0 || len(gh.createdIssues) != 0 || len(gh.createdPullRequests) != 0 || len(git.addedWorktrees) != 0 {
+		t.Fatalf("merged inbox issue should link without creating task/issue/PR: tasks=%d issues=%d prs=%d git=%+v", len(bl.created), len(gh.createdIssues), len(gh.createdPullRequests), git)
+	}
+	got := gh.issues["owner/repo"][0]
+	if hasLabelFold(got, "inbox") || !strings.HasPrefix(got.Title, "task-91:") || !strings.HasPrefix(got.Body, MarkerFor("TASK-91")) {
+		t.Fatalf("merged inbox issue should be marked, retitled, and unlabelled: %+v", got)
+	}
+}
+
+func TestInboxPRModeOpensPRFromPushedBranchWithoutRecreatingTask(t *testing.T) {
+	ctx := context.Background()
+	root := tempRoot(t)
+	base := sampleTask()
+	base.ParentTaskID = nil
+	inbox := Issue{Number: 92, DatabaseID: 92, NodeID: "I_92", HTMLURL: "https://github.com/owner/repo/issues/92", Title: "Branch exists", Body: "body", State: "open", Repo: "owner/repo", Labels: []IssueLabel{{Name: "inbox"}}}
+	branchTask := sampleTask()
+	branchTask.ID = "TASK-92"
+	branchTask.ParentTaskID = nil
+	branchTask.References = []string{inbox.HTMLURL}
+	bl := newFakeBacklog(root, base)
+	bl.tasksForUnknownDirs = []Task{branchTask}
+	gh := basicGH(map[string][]Issue{"owner/repo": {inbox}})
+	git := &recordingGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}}, remoteRepo: "owner/repo", remoteBranchExists: true}
+	cfg := testConfig(root)
+	cfg.Inbox.Mode = InboxModePR
+	app := App{Git: git, Backlog: bl, GitHub: gh, Logf: func(string, ...any) {}}
+	c, err := app.Run(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Imported != 0 || len(bl.created) != 0 || len(git.pushedBranches) != 0 || len(gh.createdPullRequests) != 1 {
+		t.Fatalf("existing remote branch should open a PR only counters=%+v creates=%d pushes=%v prs=%+v", c, len(bl.created), git.pushedBranches, gh.createdPullRequests)
+	}
+	if git.fetchBranches[0] != "inbox/owner-repo-92" || git.worktreeStartPoints[0] != "origin/inbox/owner-repo-92" {
+		t.Fatalf("existing branch should be inspected from origin branch, fetches=%v starts=%v", git.fetchBranches, git.worktreeStartPoints)
+	}
+	if !strings.HasPrefix(gh.createdPullRequests[0].Title, "task-92:") || gh.createdPullRequestBases[0] != "main" {
+		t.Fatalf("bad recovery PR title/base: bases=%v prs=%+v", gh.createdPullRequestBases, gh.createdPullRequests)
+	}
+	if got := gh.issues["owner/repo"][0]; !hasLabelFold(got, "inbox") {
+		t.Fatalf("issue should stay in inbox until recovery PR merges: %+v", got)
+	}
+}
+
+func TestInboxPRModeCleansTemporaryWorktreeOnCreateTaskFailure(t *testing.T) {
+	ctx := context.Background()
+	root := tempRoot(t)
+	base := sampleTask()
+	base.ParentTaskID = nil
+	inbox := Issue{Number: 93, DatabaseID: 93, NodeID: "I_93", HTMLURL: "https://github.com/owner/repo/issues/93", Title: "Fail", Body: "body", State: "open", Repo: "owner/repo", Labels: []IssueLabel{{Name: "inbox"}}}
+	bl := newFakeBacklog(root, base)
+	bl.createErr = errors.New("create failed")
+	gh := basicGH(map[string][]Issue{"owner/repo": {inbox}})
+	git := &recordingGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}}, remoteRepo: "owner/repo"}
+	cfg := testConfig(root)
+	cfg.Inbox.Mode = InboxModePR
+	app := App{Git: git, Backlog: bl, GitHub: gh, Logf: func(string, ...any) {}}
+	_, err := app.Run(ctx, cfg)
+	if err == nil || !strings.Contains(err.Error(), "create failed") {
+		t.Fatalf("expected create failure, got %v", err)
+	}
+	if len(git.addedWorktrees) != 1 || len(git.removedWorktrees) != 1 || git.addedWorktrees[0] != git.removedWorktrees[0] || len(git.pushedBranches) != 0 || len(gh.createdPullRequests) != 0 {
+		t.Fatalf("failure should clean temp worktree without pushing/opening PR: %+v prs=%+v", git, gh.createdPullRequests)
+	}
+}
+
+func TestInboxPRModeFailsClearlyWhenBacklogAutoCommitIsOff(t *testing.T) {
+	ctx := context.Background()
+	root := tempRoot(t)
+	base := sampleTask()
+	base.ParentTaskID = nil
+	inbox := Issue{Number: 94, DatabaseID: 94, NodeID: "I_94", HTMLURL: "https://github.com/owner/repo/issues/94", Title: "Dirty", Body: "body", State: "open", Repo: "owner/repo", Labels: []IssueLabel{{Name: "inbox"}}}
+	bl := newFakeBacklog(root, base)
+	gh := basicGH(map[string][]Issue{"owner/repo": {inbox}})
+	git := &recordingGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}}, remoteRepo: "owner/repo", dirtyWorktree: true}
+	cfg := testConfig(root)
+	cfg.Inbox.Mode = InboxModePR
+	app := App{Git: git, Backlog: bl, GitHub: gh, Logf: func(string, ...any) {}}
+	_, err := app.Run(ctx, cfg)
+	if err == nil || !strings.Contains(err.Error(), "enable Backlog autoCommit") {
+		t.Fatalf("expected clear autoCommit error, got %v", err)
+	}
+	if len(bl.created) != 1 || len(git.pushedBranches) != 0 || len(gh.createdPullRequests) != 0 || len(git.removedWorktrees) != 1 {
+		t.Fatalf("dirty temp worktree should fail before push/PR and still clean up: creates=%d git=%+v prs=%+v", len(bl.created), git, gh.createdPullRequests)
+	}
+}
+
+func TestInboxPRModeRefusesOriginOutsideAllowlist(t *testing.T) {
+	ctx := context.Background()
+	root := tempRoot(t)
+	base := sampleTask()
+	base.ParentTaskID = nil
+	inbox := Issue{Number: 95, DatabaseID: 95, NodeID: "I_95", HTMLURL: "https://github.com/owner/repo/issues/95", Title: "Origin", Body: "body", State: "open", Repo: "owner/repo", Labels: []IssueLabel{{Name: "inbox"}}}
+	bl := newFakeBacklog(root, base)
+	gh := basicGH(map[string][]Issue{"owner/repo": {inbox}})
+	git := &recordingGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}}, remoteRepo: "evil/repo"}
+	cfg := testConfig(root)
+	cfg.Inbox.Mode = InboxModePR
+	app := App{Git: git, Backlog: bl, GitHub: gh, Logf: func(string, ...any) {}}
+	_, err := app.Run(ctx, cfg)
+	if err == nil || !strings.Contains(err.Error(), "not in configured repo allowlist") {
+		t.Fatalf("expected origin allowlist refusal, got %v", err)
+	}
+	if len(git.addedWorktrees) != 0 || len(gh.createdPullRequests) != 0 {
+		t.Fatalf("allowlist refusal should happen before git/PR writes: git=%+v prs=%+v", git, gh.createdPullRequests)
+	}
+}
+
+func TestValidateConfigRejectsInvalidInboxMode(t *testing.T) {
+	cfg := testConfig("/repo")
+	cfg.Inbox.Mode = "invalid"
+	if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "inbox.mode") {
+		t.Fatalf("expected invalid inbox.mode error, got %v", err)
 	}
 }
 
@@ -536,8 +675,8 @@ func TestInboxPRModeDryRunPlansPRWithoutWrites(t *testing.T) {
 	if writes := gh.writeCalls(); writes != 0 || len(bl.created) != 0 || len(git.addedWorktrees) != 0 || len(git.pushedBranches) != 0 {
 		t.Fatalf("dry run wrote unexpectedly gh=%d tasks=%d git=%+v", writes, len(bl.created), git)
 	}
-	if !logContains(logs, "would create task from owner/repo#90 on branch inbox/owner-repo-90 and open PR in owner/repo") || !logContains(logs, "would remove inbox label") {
-		t.Fatalf("dry run did not report planned PR/unlabel logs=%v", logs)
+	if !logContains(logs, "would create task from owner/repo#90 on branch inbox/owner-repo-90 and open PR in owner/repo") || logContains(logs, "would remove inbox label") {
+		t.Fatalf("dry run did not report planned PR-only logs=%v", logs)
 	}
 }
 
@@ -561,6 +700,54 @@ func TestCollectTasksDiscoversHiddenAndCustomBacklogDirs(t *testing.T) {
 	}
 	if len(resolved.Tasks) != 3 || resolved.ByID["task-1"].ID == "" || resolved.ByID["task-2"].ID == "" || resolved.ByID["task-3"].ID == "" {
 		t.Fatalf("expected tasks from backlog, .backlog, and custom dirs, got %+v", resolved.ByID)
+	}
+}
+
+func TestCollectTasksSkipsTemporaryInboxWorktrees(t *testing.T) {
+	root := t.TempDir()
+	makeBacklogDataDir(t, filepath.Join(root, "backlog"))
+	tmpParent, err := os.MkdirTemp("", "backlog-sync-inbox-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpParent)
+	tmpWorktree := filepath.Join(tmpParent, "worktree")
+	if err := os.MkdirAll(tmpWorktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	makeBacklogDataDir(t, filepath.Join(tmpWorktree, "backlog"))
+	mainTask := sampleTask()
+	mainTask.ID = "TASK-1"
+	tmpTask := sampleTask()
+	tmpTask.ID = "TASK-999"
+	bl := &fakeBacklog{statuses: []string{"To Do", "In Progress", "Done"}, tasksByDir: map[string][]Task{root: {mainTask}, tmpWorktree: {tmpTask}}, createdID: "TASK-99"}
+	resolved, err := CollectTasks(context.Background(), testConfig(root), fakeGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}, {Path: tmpWorktree, Branch: "(detached)"}}}, bl, func(string, ...any) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved.Tasks) != 1 || resolved.ByID["task-999"].ID != "" {
+		t.Fatalf("temporary inbox worktree should be skipped, got %+v", resolved.ByID)
+	}
+}
+
+func TestCollectTasksSkipsAmbiguousNonRootBacklogDir(t *testing.T) {
+	root := t.TempDir()
+	other := t.TempDir()
+	makeBacklogDataDir(t, filepath.Join(root, "backlog"))
+	makeBacklogDataDir(t, filepath.Join(other, "one"))
+	makeBacklogDataDir(t, filepath.Join(other, "two"))
+	mainTask := sampleTask()
+	mainTask.ID = "TASK-1"
+	otherTask := sampleTask()
+	otherTask.ID = "TASK-2"
+	bl := &fakeBacklog{statuses: []string{"To Do", "In Progress", "Done"}, tasksByDir: map[string][]Task{root: {mainTask}, other: {otherTask}}, createdID: "TASK-99"}
+	var logs []string
+	resolved, err := CollectTasks(context.Background(), testConfig(root), fakeGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}, {Path: other, Branch: "task-2"}}}, bl, func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved.Tasks) != 1 || resolved.ByID["task-2"].ID != "" || !logContains(logs, "ambiguous Backlog directory") {
+		t.Fatalf("ambiguous non-root worktree should be skipped with a clear log, tasks=%+v logs=%v", resolved.ByID, logs)
 	}
 }
 
@@ -997,8 +1184,9 @@ func TestExecParsersAndJSONShapes(t *testing.T) {
 	if err != nil || parent.Repo != "owner/repo" || parent.Number != 4 || parent.ID != "PARENT" {
 		t.Fatalf("IssueParent parse=%+v err=%v", parent, err)
 	}
-	ghRunner.outputs["gh pr list --repo owner/repo --state open --json number,url,title,body,headRefName --limit 100"] = []byte(`[{"number":9,"url":"https://github.com/owner/repo/pull/9","title":"task-9: T","body":"B","headRefName":"inbox/owner-repo-9"}]`)
-	prs, err := gh.ListOpenPullRequests(context.Background(), "owner/repo")
+	ghRunner.outputs["gh pr list --repo owner/repo --state open --head inbox/owner-repo-9 --json number,url,title,body,headRefName"] = []byte(`[{"number":9,"url":"https://github.com/owner/repo/pull/9","title":"task-9: T","body":"B","headRefName":"inbox/owner-repo-9"}]`)
+	ghRunner.outputs["gh pr list --repo owner/repo --state open --search marker --json number,url,title,body,headRefName"] = []byte(`[]`)
+	prs, err := gh.ListOpenPullRequests(context.Background(), "owner/repo", "inbox/owner-repo-9", "marker")
 	if err != nil || len(prs) != 1 || prs[0].HeadRefName != "inbox/owner-repo-9" {
 		t.Fatalf("ListOpenPullRequests parse=%+v err=%v", prs, err)
 	}
@@ -1007,10 +1195,40 @@ func TestExecParsersAndJSONShapes(t *testing.T) {
 	if err != nil || pr.URL != "https://github.com/owner/repo/pull/9" || pr.HeadRefName != "inbox/owner-repo-9" {
 		t.Fatalf("CreatePullRequest=%+v err=%v", pr, err)
 	}
-	gitRunner := &scriptRunner{outputs: map[string][]byte{"git -C /repo remote get-url origin": []byte("git@github.com:owner/repo.git\n")}}
-	remoteRepo, err := (ExecGit{Runner: gitRunner}).RemoteRepo(context.Background(), "/repo", "origin")
+	gitRunner := &scriptRunner{outputs: map[string][]byte{
+		"git -C /repo remote get-url origin":                                    []byte("git@github.com:owner/repo.git\n"),
+		"git -C /repo worktree prune":                                           []byte(""),
+		"git -C /repo ls-remote --heads origin refs/heads/inbox/x":              []byte("abc\trefs/heads/inbox/x\n"),
+		"git -C /repo branch --list inbox/x":                                    []byte("  inbox/x\n"),
+		"git -C /repo branch -D inbox/x":                                        []byte("Deleted branch inbox/x\n"),
+		"git -C /repo worktree add --detach /tmp/wt origin/main":                []byte(""),
+		"git --no-optional-locks -C /tmp/wt status --porcelain=v1":              []byte(""),
+		"git -C /tmp/wt push --force-with-lease origin HEAD:refs/heads/inbox/x": []byte(""),
+	}}
+	gitExec := ExecGit{Runner: gitRunner}
+	remoteRepo, err := gitExec.RemoteRepo(context.Background(), "/repo", "origin")
 	if err != nil || remoteRepo != "owner/repo" {
 		t.Fatalf("RemoteRepo=%q err=%v", remoteRepo, err)
+	}
+	if err := gitExec.PruneWorktrees(context.Background(), "/repo"); err != nil {
+		t.Fatalf("PruneWorktrees err=%v", err)
+	}
+	exists, err := gitExec.RemoteBranchExists(context.Background(), "/repo", "origin", "inbox/x")
+	if err != nil || !exists {
+		t.Fatalf("RemoteBranchExists=%v err=%v", exists, err)
+	}
+	if err := gitExec.DeleteLocalBranch(context.Background(), "/repo", "inbox/x"); err != nil {
+		t.Fatalf("DeleteLocalBranch err=%v", err)
+	}
+	if err := gitExec.AddWorktree(context.Background(), "/repo", "/tmp/wt", "origin/main"); err != nil {
+		t.Fatalf("AddWorktree err=%v", err)
+	}
+	dirty, err := gitExec.WorktreeHasChanges(context.Background(), "/tmp/wt")
+	if err != nil || dirty {
+		t.Fatalf("WorktreeHasChanges=%v err=%v", dirty, err)
+	}
+	if err := gitExec.PushBranch(context.Background(), "/tmp/wt", "inbox/x"); err != nil {
+		t.Fatalf("PushBranch err=%v", err)
 	}
 }
 
@@ -1110,14 +1328,19 @@ func (fakeRunner) Run(context.Context, string, string, []string, []byte) ([]byte
 }
 
 type fakeGit struct {
-	worktrees        []Worktree
-	rootClean        bool
-	rootReason       string
-	remoteRepo       string
-	fetches          int
-	addedWorktrees   []string
-	removedWorktrees []string
-	pushedBranches   []string
+	worktrees            []Worktree
+	rootClean            bool
+	rootReason           string
+	remoteRepo           string
+	remoteBranchExists   bool
+	fetches              int
+	prunes               int
+	deletedLocalBranches []string
+	addedWorktrees       []string
+	worktreeStartPoints  []string
+	removedWorktrees     []string
+	dirtyWorktree        bool
+	pushedBranches       []string
 }
 
 func (g fakeGit) Worktrees(context.Context, string) ([]Worktree, error) { return g.worktrees, nil }
@@ -1130,20 +1353,35 @@ func (g fakeGit) RemoteRepo(context.Context, string, string) (string, error) {
 	}
 	return "owner/repo", nil
 }
-func (g fakeGit) Fetch(context.Context, string, string, string) error               { return nil }
-func (g fakeGit) AddWorktree(context.Context, string, string, string, string) error { return nil }
-func (g fakeGit) RemoveWorktree(context.Context, string, string) error              { return nil }
-func (g fakeGit) PushBranch(context.Context, string, string) error                  { return nil }
+func (g fakeGit) Fetch(context.Context, string, string, string) error { return nil }
+func (g fakeGit) PruneWorktrees(context.Context, string) error        { return nil }
+func (g fakeGit) RemoteBranchExists(context.Context, string, string, string) (bool, error) {
+	return g.remoteBranchExists, nil
+}
+func (g fakeGit) DeleteLocalBranch(context.Context, string, string) error   { return nil }
+func (g fakeGit) AddWorktree(context.Context, string, string, string) error { return nil }
+func (g fakeGit) RemoveWorktree(context.Context, string, string) error      { return nil }
+func (g fakeGit) WorktreeHasChanges(context.Context, string) (bool, error) {
+	return g.dirtyWorktree, nil
+}
+func (g fakeGit) PushBranch(context.Context, string, string) error { return nil }
 
 type recordingGit struct {
-	worktrees        []Worktree
-	rootClean        bool
-	rootReason       string
-	remoteRepo       string
-	fetches          int
-	addedWorktrees   []string
-	removedWorktrees []string
-	pushedBranches   []string
+	worktrees            []Worktree
+	rootClean            bool
+	rootReason           string
+	remoteRepo           string
+	remoteBranchExists   bool
+	fetches              int
+	fetchBranches        []string
+	prunes               int
+	deletedLocalBranches []string
+	addedWorktrees       []string
+	worktreeStartPoints  []string
+	removedWorktrees     []string
+	dirtyWorktree        bool
+	pushedBranches       []string
+	pushDirs             []string
 }
 
 func (g *recordingGit) Worktrees(context.Context, string) ([]Worktree, error) {
@@ -1158,45 +1396,66 @@ func (g *recordingGit) RemoteRepo(context.Context, string, string) (string, erro
 	}
 	return "owner/repo", nil
 }
-func (g *recordingGit) Fetch(context.Context, string, string, string) error {
+func (g *recordingGit) Fetch(_ context.Context, _, _, branch string) error {
 	g.fetches++
+	g.fetchBranches = append(g.fetchBranches, branch)
 	return nil
 }
-func (g *recordingGit) AddWorktree(_ context.Context, _, path, _, _ string) error {
+func (g *recordingGit) PruneWorktrees(context.Context, string) error {
+	g.prunes++
+	return nil
+}
+func (g *recordingGit) RemoteBranchExists(context.Context, string, string, string) (bool, error) {
+	return g.remoteBranchExists, nil
+}
+func (g *recordingGit) DeleteLocalBranch(_ context.Context, _ string, branch string) error {
+	g.deletedLocalBranches = append(g.deletedLocalBranches, branch)
+	return nil
+}
+func (g *recordingGit) AddWorktree(_ context.Context, _, path, startPoint string) error {
 	g.addedWorktrees = append(g.addedWorktrees, path)
+	g.worktreeStartPoints = append(g.worktreeStartPoints, startPoint)
 	return nil
 }
 func (g *recordingGit) RemoveWorktree(_ context.Context, _, path string) error {
 	g.removedWorktrees = append(g.removedWorktrees, path)
 	return nil
 }
-func (g *recordingGit) PushBranch(_ context.Context, _, branch string) error {
+func (g *recordingGit) WorktreeHasChanges(context.Context, string) (bool, error) {
+	return g.dirtyWorktree, nil
+}
+func (g *recordingGit) PushBranch(_ context.Context, dir, branch string) error {
+	g.pushDirs = append(g.pushDirs, dir)
 	g.pushedBranches = append(g.pushedBranches, branch)
 	return nil
 }
 
 type fakeBacklog struct {
-	statuses      []string
-	tasksByDir    map[string][]Task
-	createdID     string
-	created       []Task
-	createDirs    []string
-	pushed        bool
-	pushCount     int
-	badTotal      bool
-	missingTotal  bool
-	taskPrefix    string
-	taskPrefixErr error
-	statusErr     error
-	createErr     error
-	viewErr       error
+	statuses            []string
+	tasksByDir          map[string][]Task
+	createdID           string
+	created             []Task
+	createDirs          []string
+	pushed              bool
+	pushCount           int
+	badTotal            bool
+	missingTotal        bool
+	taskPrefix          string
+	taskPrefixErr       error
+	statusErr           error
+	createErr           error
+	viewErr             error
+	tasksForUnknownDirs []Task
 }
 
 func newFakeBacklog(root string, tasks ...Task) *fakeBacklog {
 	return &fakeBacklog{statuses: []string{"To Do", "In Progress", "Done"}, tasksByDir: map[string][]Task{root: tasks}, createdID: "TASK-99"}
 }
 func (b *fakeBacklog) ListTasks(_ context.Context, dir string, maxCount, skip int) (TaskListResponse, error) {
-	tasks := b.tasksByDir[dir]
+	tasks, ok := b.tasksByDir[dir]
+	if !ok {
+		tasks = b.tasksForUnknownDirs
+	}
 	if skip > len(tasks) {
 		skip = len(tasks)
 	}
@@ -1227,7 +1486,11 @@ func (b *fakeBacklog) ViewTask(_ context.Context, dir, id string) (TaskViewRespo
 	if b.viewErr != nil {
 		return TaskViewResponse{}, b.viewErr
 	}
-	for _, task := range b.tasksByDir[dir] {
+	tasks, ok := b.tasksByDir[dir]
+	if !ok {
+		tasks = b.tasksForUnknownDirs
+	}
+	for _, task := range tasks {
 		if CanonicalTaskID(task.ID) == CanonicalTaskID(id) {
 			return TaskViewResponse{Task: task}, nil
 		}
@@ -1260,7 +1523,7 @@ func (b *fakeBacklog) CreateTask(_ context.Context, dir string, in CreateTaskInp
 	task := Task{ID: b.createdID, Title: in.Title, Description: in.Description, Labels: in.Labels, Status: "To Do", Project: &p, References: in.References}
 	b.created = append(b.created, task)
 	b.createDirs = append(b.createDirs, dir)
-	b.tasksByDir[firstDir(b.tasksByDir)] = append(b.tasksByDir[firstDir(b.tasksByDir)], task)
+	b.tasksByDir[dir] = append(b.tasksByDir[dir], task)
 	return b.createdID, nil
 }
 func (b *fakeBacklog) Push(context.Context, string, string) error {
@@ -1292,7 +1555,10 @@ type fakeGitHub struct {
 	subIssueErr              error
 	removeSubIssueErr        error
 	pullRequests             []PullRequest
+	prListHeads              []string
+	prListMarkers            []string
 	createdPullRequests      []PullRequest
+	createdPullRequestBases  []string
 	updateErr                error
 	addProjectItemErr        error
 	createErrTitleContains   string
@@ -1458,15 +1724,18 @@ func (g *fakeGitHub) RemoveSubIssue(_ context.Context, _ string, childNodeID str
 	delete(g.parents, childNodeID)
 	return nil
 }
-func (g *fakeGitHub) ListOpenPullRequests(context.Context, string) ([]PullRequest, error) {
+func (g *fakeGitHub) ListOpenPullRequests(_ context.Context, _, head, marker string) ([]PullRequest, error) {
+	g.prListHeads = append(g.prListHeads, head)
+	g.prListMarkers = append(g.prListMarkers, marker)
 	return append([]PullRequest(nil), g.pullRequests...), nil
 }
-func (g *fakeGitHub) CreatePullRequest(_ context.Context, _ string, head, _ string, title, body string) (PullRequest, error) {
+func (g *fakeGitHub) CreatePullRequest(_ context.Context, _ string, head, base string, title, body string) (PullRequest, error) {
 	if g.failOnWrite {
 		return PullRequest{}, errors.New("unexpected write")
 	}
 	pr := PullRequest{Number: 200 + len(g.createdPullRequests), URL: fmt.Sprintf("https://github.com/owner/repo/pull/%d", 200+len(g.createdPullRequests)), Title: title, Body: body, HeadRefName: head}
 	g.createdPullRequests = append(g.createdPullRequests, pr)
+	g.createdPullRequestBases = append(g.createdPullRequestBases, base)
 	g.pullRequests = append(g.pullRequests, pr)
 	return pr, nil
 }
@@ -1481,6 +1750,7 @@ func (g *fakeGitHub) resetWriteCounters() {
 	g.addSubIssueCalls = 0
 	g.removeSubIssueCalls = 0
 	g.createdPullRequests = nil
+	g.createdPullRequestBases = nil
 }
 
 func (g *fakeGitHub) writeCalls() int {
