@@ -66,11 +66,11 @@ Canadian Ham config committed at the repository root:
 
 ## Cross-worktree Backlog reads
 
-The tool runs `git -C <root> worktree list --porcelain`, skips bare/prunable/missing worktrees and worktrees without a Backlog data directory, then reads each worktree through the `backlog` CLI (`task list --json` with pagination and `task view <id> --json`). The data directory is discovered read-only from the worktree: `backlog/` and `.backlog/` are preferred, and a single custom directory containing Backlog `config.yml` plus task data is accepted. Pagination is validated against the reported `total`. The main worktree must be scanned and must return at least one task before any GitHub call is made.
+The tool runs `git -C <root> worktree list --porcelain`, skips bare/prunable/missing worktrees and worktrees without a Backlog data directory, then reads each worktree through the `backlog` CLI (`task list --json` with pagination and `task view <id> --json`). The data directory is discovered read-only from the worktree using the same layouts the Backlog.md CLI resolves when run from the worktree root: root `backlog.config.yml` `backlog_directory`, then `backlog/`, then `.backlog/`. It does not recursively search for nested custom folders because the CLI invoked from the worktree root would not use them. Pagination is validated against the reported `total`. The main worktree must resolve and scan a Backlog directory and must return at least one task before any GitHub call is made.
 
 `BACKLOG_CWD` and other `BACKLOG_*` environment variables are stripped from child processes so the CLI reads the intended worktree. Remote-only branches without a local worktree are out of scope.
 
-Task IDs use the Backlog task prefix read from `backlog config get taskPrefix` / `task_prefix`, falling back to read-only parsing of the discovered Backlog `config.yml` when needed. IDs are normalized to lowercase for markers and title prefixes, including dotted IDs such as `task-1.2.7`.
+Task IDs use the Backlog task prefix read from `backlog config get taskPrefix` / `task_prefix`, falling back to read-only parsing of root `backlog.config.yml` and then the discovered Backlog `config.yml` or `config.yaml` when needed. IDs are normalized to lowercase for markers and title prefixes, including dotted IDs such as `task-1.2.7`.
 
 ## Task resolution and placement
 

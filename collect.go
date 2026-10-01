@@ -59,12 +59,15 @@ func CollectTasks(ctx context.Context, cfg Config, git Git, backlog Backlog, log
 				return ResolvedTasks{}, fmt.Errorf("discover Backlog directory in main worktree %s: %w", wt.Path, err)
 			}
 			if logf != nil {
-				logf("skip worktree with ambiguous Backlog directory %s: %v", wt.Path, err)
+				logf("skip worktree: cannot resolve Backlog directory %s: %v", wt.Path, err)
 			}
 			continue
 		} else if !ok {
+			if wt.IsRoot {
+				return ResolvedTasks{}, fmt.Errorf("discover Backlog directory in main worktree %s: no Backlog directory found", wt.Path)
+			}
 			if logf != nil {
-				logf("skip worktree without Backlog config: %s", wt.Path)
+				logf("skip worktree without Backlog directory: %s", wt.Path)
 			}
 			continue
 		} else if logf != nil {
@@ -159,6 +162,10 @@ func shouldSkipWorktree(wt Worktree) bool {
 }
 
 func DiscoverBacklogDir(root string) (string, bool, error) {
+	// Match the Backlog.md CLI layouts resolved from the worktree root: root
+	// backlog.config.yml backlog_directory, then backlog/, then .backlog/.
+	// Do not recursively search nested config files; the syncer invokes the CLI
+	// from wt.Path, and the CLI would not resolve those nested folders either.
 	if path, ok, err := discoverBacklogDirFromRootConfig(root); err != nil || ok {
 		return path, ok, err
 	}
@@ -168,58 +175,13 @@ func DiscoverBacklogDir(root string) (string, bool, error) {
 			return path, true, nil
 		}
 	}
-	var found []string
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if path == root {
-			return nil
-		}
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			return nil
-		}
-		if entry.IsDir() {
-			name := entry.Name()
-			if name == ".git" || name == "node_modules" || name == ".build" || name == "DerivedData" {
-				return filepath.SkipDir
-			}
-			if strings.Count(rel, string(os.PathSeparator)) >= 3 {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if entry.Name() != "config.yml" {
-			return nil
-		}
-		dir := filepath.Dir(path)
-		if isBacklogDataDir(dir) {
-			found = append(found, dir)
-		}
-		return nil
-	})
-	if err != nil {
-		return "", false, err
-	}
-	sort.Strings(found)
-	unique := found[:0]
-	for _, dir := range found {
-		if len(unique) == 0 || unique[len(unique)-1] != dir {
-			unique = append(unique, dir)
-		}
-	}
-	if len(unique) == 0 {
-		return "", false, nil
-	}
-	if len(unique) > 1 {
-		return "", false, fmt.Errorf("multiple Backlog data directories found: %s", strings.Join(unique, ", "))
-	}
-	return unique[0], true, nil
+	return "", false, nil
 }
 
+const rootBacklogConfigFile = "backlog.config.yml"
+
 func discoverBacklogDirFromRootConfig(root string) (string, bool, error) {
-	configPath := filepath.Join(root, "backlog.config.yml")
+	configPath := filepath.Join(root, rootBacklogConfigFile)
 	data, err := os.ReadFile(configPath)
 	if os.IsNotExist(err) {
 		return "", false, nil
@@ -227,7 +189,7 @@ func discoverBacklogDirFromRootConfig(root string) (string, bool, error) {
 	if err != nil {
 		return "", false, fmt.Errorf("read %s: %w", configPath, err)
 	}
-	rel, ok, err := parseBacklogDirectory(data)
+	rel, ok, err := parseRootConfigValue(data, "backlog_directory")
 	if err != nil {
 		return "", false, fmt.Errorf("parse %s: %w", configPath, err)
 	}
@@ -255,14 +217,14 @@ func discoverBacklogDirFromRootConfig(root string) (string, bool, error) {
 	return path, true, nil
 }
 
-func parseBacklogDirectory(data []byte) (string, bool, error) {
+func parseRootConfigValue(data []byte, name string) (string, bool, error) {
 	for i, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		key, rawValue, ok := strings.Cut(line, ":")
-		if !ok || strings.TrimSpace(key) != "backlog_directory" {
+		if !ok || strings.TrimSpace(key) != name {
 			continue
 		}
 		value := stripYAMLComment(strings.TrimSpace(rawValue))
@@ -271,7 +233,7 @@ func parseBacklogDirectory(data []byte) (string, bool, error) {
 			return "", false, fmt.Errorf("line %d: %w", i+1, err)
 		}
 		if value == "" {
-			return "", false, fmt.Errorf("line %d: backlog_directory is empty", i+1)
+			return "", false, fmt.Errorf("line %d: %s is empty", i+1, name)
 		}
 		return value, true, nil
 	}
@@ -317,7 +279,7 @@ func unquoteYAMLScalar(value string) (string, error) {
 		return value, nil
 	}
 	if len(value) < 2 || value[len(value)-1] != quote {
-		return "", fmt.Errorf("unterminated quoted backlog_directory")
+		return "", fmt.Errorf("unterminated quoted value")
 	}
 	inner := value[1 : len(value)-1]
 	if quote == '\'' {
@@ -329,18 +291,29 @@ func unquoteYAMLScalar(value string) (string, error) {
 }
 
 func isBacklogDataDir(path string) bool {
-	info, err := os.Stat(filepath.Join(path, "config.yml"))
-	if err != nil || info.IsDir() {
+	configPath, ok := backlogDataConfigPath(path)
+	if !ok {
 		return false
 	}
 	if taskInfo, err := os.Stat(filepath.Join(path, "tasks")); err == nil && taskInfo.IsDir() {
 		return true
 	}
-	data, err := os.ReadFile(filepath.Join(path, "config.yml"))
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return false
 	}
 	return strings.Contains(string(data), "task_prefix:") || strings.Contains(string(data), "statuses:")
+}
+
+func backlogDataConfigPath(path string) (string, bool) {
+	for _, name := range []string{"config.yml", "config.yaml"} {
+		configPath := filepath.Join(path, name)
+		info, err := os.Stat(configPath)
+		if err == nil && !info.IsDir() {
+			return configPath, true
+		}
+	}
+	return "", false
 }
 
 func ResolveTaskCopy(id string, copies []TaskCopy, statusRank map[string]int, root string) TaskCopy {

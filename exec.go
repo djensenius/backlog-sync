@@ -115,6 +115,9 @@ func (b ExecBacklog) TaskPrefix(ctx context.Context, dir string) (string, error)
 			}
 		}
 	}
+	if prefix, ok, err := readTaskPrefixFromRootConfig(dir); err != nil || ok {
+		return strings.ToLower(strings.TrimSpace(prefix)), err
+	}
 	backlogDir, ok, err := DiscoverBacklogDir(dir)
 	if err != nil {
 		return "", err
@@ -122,16 +125,46 @@ func (b ExecBacklog) TaskPrefix(ctx context.Context, dir string) (string, error)
 	if !ok {
 		return "", errors.New("Backlog data directory not found")
 	}
-	data, err := os.ReadFile(filepath.Join(backlogDir, "config.yml"))
+	prefix, ok, err := readTaskPrefixFromBacklogDir(backlogDir)
 	if err != nil {
 		return "", err
 	}
-	re := regexp.MustCompile(`(?m)^task_prefix:\s*"?([^"\n]+)"?\s*$`)
-	m := re.FindSubmatch(data)
-	if len(m) < 2 {
-		return "", fmt.Errorf("task_prefix not found in %s", filepath.Join(backlogDir, "config.yml"))
+	if !ok {
+		return "", fmt.Errorf("task_prefix not found in %s or %s", filepath.Join(dir, rootBacklogConfigFile), backlogDir)
 	}
-	return strings.ToLower(strings.TrimSpace(string(m[1]))), nil
+	return strings.ToLower(strings.TrimSpace(prefix)), nil
+}
+
+func readTaskPrefixFromRootConfig(root string) (string, bool, error) {
+	configPath := filepath.Join(root, rootBacklogConfigFile)
+	data, err := os.ReadFile(configPath)
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read %s: %w", configPath, err)
+	}
+	prefix, ok, err := parseRootConfigValue(data, "task_prefix")
+	if err != nil {
+		return "", false, fmt.Errorf("parse %s: %w", configPath, err)
+	}
+	return prefix, ok, nil
+}
+
+func readTaskPrefixFromBacklogDir(backlogDir string) (string, bool, error) {
+	configPath, ok := backlogDataConfigPath(backlogDir)
+	if !ok {
+		return "", false, nil
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return "", false, err
+	}
+	prefix, ok, err := parseRootConfigValue(data, "task_prefix")
+	if err != nil {
+		return "", false, fmt.Errorf("parse %s: %w", configPath, err)
+	}
+	return prefix, ok, nil
 }
 
 func (b ExecBacklog) Milestones(ctx context.Context, dir string) (map[string]string, error) {

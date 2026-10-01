@@ -500,6 +500,36 @@ func TestDiscoverBacklogDirUsesRootConfigCustomDirectory(t *testing.T) {
 	}
 }
 
+func TestDiscoverBacklogDirRootConfigWinsOverFolderLocalBacklog(t *testing.T) {
+	root := t.TempDir()
+	customRel := "custom-backlog"
+	customPath := filepath.Join(root, customRel)
+	if err := os.MkdirAll(filepath.Join(customPath, "tasks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	makeBacklogDataDir(t, filepath.Join(root, "backlog"))
+	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("backlog_directory: "+customRel+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := DiscoverBacklogDir(root)
+	if err != nil || !ok || got != customPath {
+		t.Fatalf("root config should win over folder-local backlog, got %q %v err=%v, want %q", got, ok, err, customPath)
+	}
+}
+
+func TestDiscoverBacklogDirRootConfigWithoutDirectoryFallsBack(t *testing.T) {
+	root := t.TempDir()
+	want := filepath.Join(root, "backlog")
+	makeBacklogDataDir(t, want)
+	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("# root config without backlog_directory\ntask_prefix: bug\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := DiscoverBacklogDir(root)
+	if err != nil || !ok || got != want {
+		t.Fatalf("root config without backlog_directory should fall back, got %q %v err=%v, want %q", got, ok, err, want)
+	}
+}
+
 func TestDiscoverBacklogDirUsesRootConfigForBuiltinDirectories(t *testing.T) {
 	for _, rel := range []string{"backlog", ".backlog"} {
 		t.Run(rel, func(t *testing.T) {
@@ -519,6 +549,21 @@ func TestDiscoverBacklogDirUsesRootConfigForBuiltinDirectories(t *testing.T) {
 	}
 }
 
+func TestDiscoverBacklogDirFallsBackToConfigYAML(t *testing.T) {
+	root := t.TempDir()
+	want := filepath.Join(root, "backlog")
+	if err := os.MkdirAll(filepath.Join(want, "tasks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(want, "config.yaml"), []byte("statuses: [\"To Do\", \"Done\"]\ntask_prefix: task\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := DiscoverBacklogDir(root)
+	if err != nil || !ok || got != want {
+		t.Fatalf("config.yaml Backlog dir not discovered, got %q %v err=%v, want %q", got, ok, err, want)
+	}
+}
+
 func TestDiscoverBacklogDirRootConfigMissingTargetErrors(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("backlog_directory: missing # target is absent\n"), 0o644); err != nil {
@@ -530,13 +575,16 @@ func TestDiscoverBacklogDirRootConfigMissingTargetErrors(t *testing.T) {
 	}
 }
 
-func TestCollectTasksDiscoversHiddenAndCustomBacklogDirs(t *testing.T) {
+func TestCollectTasksDiscoversBuiltInAndRootConfigBacklogDirs(t *testing.T) {
 	root := t.TempDir()
 	hidden := t.TempDir()
 	custom := t.TempDir()
-	makeBacklogDataDir(t, filepath.Join(root, "custom-backlog"))
+	makeBacklogDataDir(t, filepath.Join(root, "backlog"))
 	makeBacklogDataDir(t, filepath.Join(hidden, ".backlog"))
 	makeBacklogDataDir(t, filepath.Join(custom, "workflow", "data"))
+	if err := os.WriteFile(filepath.Join(custom, "backlog.config.yml"), []byte("backlog_directory: workflow/data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	mainTask := sampleTask()
 	mainTask.ID = "TASK-1"
 	hiddenTask := sampleTask()
@@ -549,28 +597,27 @@ func TestCollectTasksDiscoversHiddenAndCustomBacklogDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(resolved.Tasks) != 3 || resolved.ByID["task-1"].ID == "" || resolved.ByID["task-2"].ID == "" || resolved.ByID["task-3"].ID == "" {
-		t.Fatalf("expected tasks from backlog, .backlog, and custom dirs, got %+v", resolved.ByID)
+		t.Fatalf("expected tasks from backlog, .backlog, and root-config custom dirs, got %+v", resolved.ByID)
 	}
 }
 
-func TestCollectTasksSkipsAmbiguousNonRootBacklogDir(t *testing.T) {
+func TestCollectTasksSkipsNonRootWorktreeWithUnresolvableBacklogDir(t *testing.T) {
 	root := t.TempDir()
 	other := t.TempDir()
 	makeBacklogDataDir(t, filepath.Join(root, "backlog"))
-	makeBacklogDataDir(t, filepath.Join(other, "one"))
-	makeBacklogDataDir(t, filepath.Join(other, "two"))
+	if err := os.WriteFile(filepath.Join(other, "backlog.config.yml"), []byte("backlog_directory: missing\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	mainTask := sampleTask()
 	mainTask.ID = "TASK-1"
-	otherTask := sampleTask()
-	otherTask.ID = "TASK-2"
-	bl := &fakeBacklog{statuses: []string{"To Do", "In Progress", "Done"}, tasksByDir: map[string][]Task{root: {mainTask}, other: {otherTask}}, createdID: "TASK-99"}
+	bl := &fakeBacklog{statuses: []string{"To Do", "In Progress", "Done"}, tasksByDir: map[string][]Task{root: {mainTask}}, createdID: "TASK-99"}
 	var logs []string
 	resolved, err := CollectTasks(context.Background(), testConfig(root), fakeGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}, {Path: other, Branch: "task-2"}}}, bl, func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(resolved.Tasks) != 1 || resolved.ByID["task-2"].ID != "" || !logContains(logs, "ambiguous Backlog directory") {
-		t.Fatalf("ambiguous non-root worktree should be skipped with a clear log, tasks=%+v logs=%v", resolved.ByID, logs)
+	if len(resolved.Tasks) != 1 || !logContains(logs, "cannot resolve Backlog directory") || !logContains(logs, "does not exist") {
+		t.Fatalf("unresolvable non-root worktree should be skipped with a clear log, tasks=%+v logs=%v", resolved.ByID, logs)
 	}
 }
 
@@ -964,6 +1011,17 @@ func TestGitStatusUsesNoOptionalLocks(t *testing.T) {
 	clean, reason, err := (ExecGit{Runner: r}).RootBranchClean(context.Background(), "/repo", "main")
 	if err != nil || !clean || reason != "" {
 		t.Fatalf("RootBranchClean=%v %q err=%v", clean, reason, err)
+	}
+}
+
+func TestExecTaskPrefixFallsBackToRootConfig(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("backlog_directory: custom\ntask_prefix: 'bug' # root setting\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prefix, err := (ExecBacklog{Runner: &scriptRunner{outputs: map[string][]byte{}}}).TaskPrefix(context.Background(), root)
+	if err != nil || prefix != "bug" {
+		t.Fatalf("TaskPrefix root fallback=%q err=%v, want bug nil", prefix, err)
 	}
 }
 
