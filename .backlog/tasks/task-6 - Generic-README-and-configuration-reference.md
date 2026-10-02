@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@david'
 created_date: '2026-10-01 15:18'
-updated_date: '2026-10-02 01:39'
+updated_date: '2026-10-02 01:41'
 labels:
   - docs
 milestone: m-0
@@ -51,4 +51,6 @@ Implemented standalone generic README/config reference and added README link/sta
 - Stale path grep across README/examples/docs/launchd/install script: no `/Users/`, `canadian-ham`, or `ArkhamHorror` matches.
 
 Starting review-fix pass after reviewer REQUEST CHANGES. Scope limited to README/docs/tests unless a tiny fixture update is required; no runtime root/config/launchd behavior changes planned.
+
+Review-fix docs/tests implemented. Evidence so far: targeted README/config sample tests passed with go test ./... -run 'Test(ReadmeConfigExamplesMatchSampleFiles|ReadmeLinksToSampleConfigs|ReadmeLocalMarkdownLinksResolve|ReadmeHasNoConsumerSpecificPaths|SampleConfigsParseStrictlyWithoutNetwork)' (ok github.com/djensenius/backlog-sync 0.230s); go test ./... passed (ok github.com/djensenius/backlog-sync 0.766s); go vet ./... passed with no output. Acceptance criteria intentionally left unchecked until coordinator finalization.
 <!-- SECTION:NOTES:END -->
