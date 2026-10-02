@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "kind": "task-list",
+  "tasks": [
+    {
+      "id": "TASK-1",
+      "title": "Repository protections: main ruleset with required PRs, CI and automatic Copilot review",
+      "status": "To Do",
+      "type": null,
+      "priority": null,
+      "project": null,
+      "assignees": [],
+      "reporter": null,
+      "labels": [
+        "ci",
+        "repo"
+      ],
+      "milestone": "m-0",
+      "parentTaskId": null,
+      "acceptanceCriteriaCompleted": 0,
+      "acceptanceCriteriaCount": 4,
+      "references": [],
+      "modifiedFiles": [],
+      "ordinal": 1000,
+      "createdAt": "2026-10-01T15:18:00Z",
+      "updatedAt": null,
+      "dueDate": null,
+      "isReady": true
+    },
+    {
+      "id": "TASK-2",
+      "title": "CI workflow with mise tasks, like gopod",
+      "status": "Done",
+      "type": null,
+      "priority": null,
+      "project": null,
+      "assignees": [
+        "@david"
+      ],
+      "reporter": null,
+      "labels": [
+        "ci"
+      ],
+      "milestone": "m-0",
+      "parentTaskId": null,
+      "acceptanceCriteriaCompleted": 4,
+      "acceptanceCriteriaCount": 4,
+      "references": [],
+      "modifiedFiles": [],
+      "ordinal": 2000,
+      "createdAt": "2026-10-01T15:18:00Z",
+      "updatedAt": "2026-10-01T17:23:00Z",
+      "dueDate": null,
+      "isReady": false
+    }
+  ],
+  "total": 10,
+  "nextSkip": 2
+}

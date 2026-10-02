@@ -47,7 +47,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer unlock()
-	runner := OSCommandRunner{Timeout: time.Duration(cfg.TimeoutSeconds) * time.Second}
+	runner := OSCommandRunner{Timeout: time.Duration(cfg.TimeoutSeconds) * time.Second, ProtectBacklogGitWrites: cfg.DryRun}
 	gh := ExecGitHub{Runner: runner, AllowedRepos: cfg.ConfiguredRepos()}
 	app := App{Git: ExecGit{Runner: runner}, Backlog: ExecBacklog{Runner: runner}, GitHub: gh, Logf: logf}
 	if _, err := app.Run(context.Background(), cfg); err != nil {

@@ -320,7 +320,7 @@ backlog-sync --config .backlog-sync.json --dry-run --verbose
 backlog-sync --root /path/to/consumer-repo --config /path/to/private/backlog-sync.json --dry-run --verbose
 ```
 
-Dry runs still read git worktrees, Backlog data, GitHub issues, and Project metadata from the resolved root repository. The `--config` path alone does not select that repository. Dry runs make no GitHub, Backlog, or git writes. Planned writes are printed as log lines. The command still validates Project Status options and config safety before it would write.
+Dry runs still read git worktrees, Backlog data, GitHub issues, and Project metadata from the resolved root repository. The `--config` path alone does not select that repository. Dry runs make no GitHub, Backlog, or git writes; Backlog read subprocesses run with remote fetches disabled so `FETCH_HEAD` and refs are not updated. Planned writes are printed as log lines. The command still validates Project Status options and config safety before it would write.
 
 ## launchd per config
 
