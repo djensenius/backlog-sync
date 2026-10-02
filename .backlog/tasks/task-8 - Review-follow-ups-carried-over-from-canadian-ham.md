@@ -29,3 +29,11 @@ Code reviews of the syncer in djensenius/canadian-ham (task-16 to task-19 and PR
 - [ ] #5 Tests cover the remove-error path, a captured `task list --json` fixture, a nested custom folder that is NOT discovered, the main worktree without a Backlog folder, and a line-boundary truncation case
 - [ ] #6 A dry run is confirmed not to write FETCH_HEAD or refs, or the README documents the backlog CLI's fetch behaviour
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Verify the existing review-follow-up coverage against TASK-8 acceptance criteria, focusing on push-mode inbox body-size handling and requested fixtures/edge cases.
+2. Add the smallest missing test or logic changes for any uncovered TASK-8 edge case without broadening sync behaviour.
+3. Run targeted tests plus go test ./... and go vet ./..., then record evidence in TASK-8 notes and commit the code and Backlog updates.
+<!-- SECTION:PLAN:END -->
