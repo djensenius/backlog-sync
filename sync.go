@@ -69,12 +69,13 @@ func (a *App) Run(ctx context.Context, cfg Config) (Counters, error) {
 		a.Logf("error: %s %s failed: %v", CanonicalTaskID(taskID), operation, err)
 	}
 	if cfg.Inbox.Enabled && !cfg.NoInbox {
-		imported, triage, linked, err := a.processInbox(ctx, cfg, allIssues, markerIssues, issueByTaskID, claimedIssues, resolved)
+		imported, triage, linked, failed, err := a.processInbox(ctx, cfg, allIssues, markerIssues, issueByTaskID, claimedIssues, resolved)
+		counters.Imported += imported
+		counters.InboxTriage += triage
+		counters.Failed += failed
 		if err != nil {
 			return counters, err
 		}
-		counters.Imported += imported
-		counters.InboxTriage += triage
 		for id, issue := range linked {
 			markerIssues[id] = issue
 			issueByTaskID[id] = issue
@@ -444,7 +445,7 @@ func DiffIssue(task Task, issue Issue, body string, labels []string) (IssuePatch
 
 const manualInboxTriageClaim = "manual inbox triage"
 
-func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, markerIssues map[string]Issue, issueByTaskID map[string]Issue, claimedIssues map[string]string, resolved ResolvedTasks) (imported int, triage int, linked map[string]Issue, err error) {
+func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, markerIssues map[string]Issue, issueByTaskID map[string]Issue, claimedIssues map[string]string, resolved ResolvedTasks) (imported int, triage int, linked map[string]Issue, failed int, err error) {
 	linked = map[string]Issue{}
 	if cfg.Inbox.Mode == InboxModeManual {
 		for _, issue := range issues {
@@ -463,12 +464,12 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 			a.Logf("inbox issue %s#%d needs triage: %s", issue.Repo, issue.Number, issue.Title)
 			triage++
 		}
-		return 0, triage, linked, nil
+		return 0, triage, linked, 0, nil
 	}
 
 	clean, reason, err := a.Git.RootBranchClean(ctx, cfg.Root, cfg.MainBranch)
 	if err != nil {
-		return 0, 0, nil, err
+		return 0, 0, nil, 0, err
 	}
 	defer func() {
 		if imported > 0 && cfg.Inbox.Push && !cfg.DryRun {
@@ -489,7 +490,7 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 			if !cfg.DryRun {
 				updated, err = a.GitHub.UpdateIssue(ctx, issue.Repo, issue.Number, patch)
 				if err != nil {
-					return imported, triage, linked, err
+					return imported, triage, linked, failed, err
 				}
 			}
 			updated.Repo = issue.Repo
@@ -515,14 +516,14 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 			if existing, ok := markerIssues[canonicalTaskID]; ok && !sameIssue(existing, issue) {
 				a.Logf("warning: refusing to mark inbox issue %s#%d for %s because %s already has %s#%d; removing only inbox label", issue.Repo, issue.Number, canonicalTaskID, canonicalTaskID, existing.Repo, existing.Number)
 				if err := a.stripInboxLabel(ctx, cfg, issue); err != nil {
-					return imported, triage, linked, err
+					return imported, triage, linked, failed, err
 				}
 				continue
 			}
 			if owner, claimed := claimedIssues[issueClaimKey(issue)]; claimed && owner != canonicalTaskID {
 				a.Logf("warning: refusing to mark inbox issue %s#%d for %s because it is already claimed by %s; removing only inbox label", issue.Repo, issue.Number, canonicalTaskID, owner)
 				if err := a.stripInboxLabel(ctx, cfg, issue); err != nil {
-					return imported, triage, linked, err
+					return imported, triage, linked, failed, err
 				}
 				continue
 			}
@@ -536,7 +537,7 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 			} else {
 				id, err := a.Backlog.CreateTask(ctx, cfg.Root, CreateTaskInput{Title: issue.Title, Description: description, Labels: []string{}, Project: project, References: []string{issueURL}, TaskPrefix: cfg.TaskPrefix})
 				if err != nil {
-					return imported, triage, linked, err
+					return imported, triage, linked, failed, err
 				}
 				taskID = id
 				imported++
@@ -548,12 +549,17 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 			continue
 		}
 		body := MarkerFor(taskID) + "\n" + issue.Body
+		if err := validateIssueBodyWithinGitHubLimit(taskID, body); err != nil {
+			failed++
+			a.Logf("error: %s import inbox issue %s#%d failed: %v", CanonicalTaskID(taskID), issue.Repo, issue.Number, err)
+			continue
+		}
 		title := fmt.Sprintf("%s: %s", CanonicalTaskID(taskID), issue.Title)
 		labels := removeLabelFold(LabelsOf(issue), cfg.Inbox.Label)
 		patch := IssuePatch{Title: &title, Body: &body, Labels: &labels}
 		updated, err := a.GitHub.UpdateIssue(ctx, issue.Repo, issue.Number, patch)
 		if err != nil {
-			return imported, triage, linked, err
+			return imported, triage, linked, failed, err
 		}
 		updated.Repo = issue.Repo
 		linked[CanonicalTaskID(taskID)] = updated
@@ -563,7 +569,7 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 			claimedIssues[key] = CanonicalTaskID(taskID)
 		}
 	}
-	return imported, triage, linked, nil
+	return imported, triage, linked, failed, nil
 }
 
 func (a *App) stripInboxLabel(ctx context.Context, cfg Config, issue Issue) error {
@@ -862,7 +868,7 @@ func (a *App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTa
 		a.LogAction(cfg.DryRun, "link %s#%d under parent %s#%d", child.Repo, child.Number, parent.Repo, parent.Number)
 		if !cfg.DryRun {
 			if current.ID != "" {
-				if err := a.GitHub.RemoveSubIssue(ctx, current.ID, child.NodeID); err != nil {
+				if err := a.GitHub.RemoveSubIssue(ctx, current.Repo, current.ID, child.NodeID); err != nil {
 					failed++
 					a.Logf("error: %s remove sub-issue parent %s#%d failed: %v", id, current.Repo, current.Number, err)
 					continue
@@ -870,7 +876,7 @@ func (a *App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTa
 			}
 			if err := a.GitHub.AddSubIssue(ctx, parent.Repo, parent.Number, child.DatabaseID); err != nil {
 				if isExpectedSubIssueLinkRejection(err) {
-					a.warnOnce(warned, "add-sub-issue-"+strings.ToLower(err.Error()), "warning: sub-issue links are not supported for %s#%d under %s#%d; skipping link: %v", child.Repo, child.Number, parent.Repo, parent.Number, err)
+					a.warnOnce(warned, "add-sub-issue-unsupported", "warning: sub-issue links are not supported for %s#%d under %s#%d; skipping link: %v", child.Repo, child.Number, parent.Repo, parent.Number, err)
 					continue
 				}
 				failed++

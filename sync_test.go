@@ -446,6 +446,44 @@ func TestMultiRepoInboxCreatesWithProjectAndReferenceGuard(t *testing.T) {
 	}
 }
 
+func TestInboxPushOversizedMarkerBodyRecordsFailureAndContinues(t *testing.T) {
+	ctx := context.Background()
+	root := tempRoot(t)
+	existing := sampleTask()
+	existing.ParentTaskID = nil
+	existing.Subtasks = nil
+	cfg := testConfig(root)
+	cfg.Inbox.Push = true
+	cfg.SubIssues = false
+	existingBody := RenderIssueBodyWithOptions(existing, RenderOptions{Milestones: map[string]string{"m-0": "v1 release"}, MainBranch: cfg.MainBranch})
+	mirrored := Issue{Number: 1, DatabaseID: 1, NodeID: "I_1", HTMLURL: "https://github.com/owner/repo/issues/1", Title: IssueTitle(existing), Body: existingBody, State: "open", Repo: "owner/repo", Labels: labelsToIssueLabels(DesiredLabels(existing, Issue{}, cfg))}
+	oversized := Issue{Number: 10, DatabaseID: 10, NodeID: "I_10", HTMLURL: "https://github.com/owner/repo/issues/10", Title: "Too large", Body: strings.Repeat("x", githubIssueBodyCharacterLimit), State: "open", Repo: "owner/repo", Labels: []IssueLabel{{Name: "inbox"}}}
+	okIssue := Issue{Number: 11, DatabaseID: 11, NodeID: "I_11", HTMLURL: "https://github.com/owner/repo/issues/11", Title: "Small", Body: "small body", State: "open", Repo: "owner/repo", Labels: []IssueLabel{{Name: "inbox"}}}
+	bl := newFakeBacklog(root, existing)
+	bl.createdIDs = []string{"TASK-100", "TASK-101"}
+	gh := basicGH(map[string][]Issue{"owner/repo": {mirrored, oversized, okIssue}})
+	var logs []string
+	app := App{Git: fakeGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}}, rootClean: true}, Backlog: bl, GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	c, err := app.Run(ctx, cfg)
+	if err == nil || !strings.Contains(err.Error(), "1 task sync operation(s) failed") || c.Imported != 2 || c.Failed != 1 {
+		t.Fatalf("oversized inbox body should be one per-task failure while continuing, counters=%+v err=%v logs=%v", c, err, logs)
+	}
+	largeAfter := gh.issues["owner/repo"][1]
+	if largeAfter.Title != oversized.Title || largeAfter.Body != oversized.Body || !hasLabelFold(largeAfter, "inbox") {
+		t.Fatalf("oversized inbox issue should not be mutated: %+v", largeAfter)
+	}
+	smallAfter := gh.issues["owner/repo"][2]
+	if !strings.HasPrefix(smallAfter.Title, "task-101:") || !strings.HasPrefix(smallAfter.Body, MarkerFor("TASK-101")+"\n") || hasLabelFold(smallAfter, "inbox") {
+		t.Fatalf("small inbox issue should still be imported after oversized failure: %+v", smallAfter)
+	}
+	if bl.pushCount != 1 {
+		t.Fatalf("successful inbox imports should still push once, pushCount=%d", bl.pushCount)
+	}
+	if !logContains(logs, "error: task-100 import inbox issue owner/repo#10 failed") || !logContains(logs, "GitHub hard limit") {
+		t.Fatalf("missing per-task size failure log: %v", logs)
+	}
+}
+
 func TestInboxManualModeReportsNeedsTriageWithoutWrites(t *testing.T) {
 	ctx := context.Background()
 	root := tempRoot(t)
@@ -562,12 +600,60 @@ func TestDiscoverBacklogDirUsesRootConfigCustomDirectory(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(customPath, "tasks"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("# root Backlog.md config\nbacklog_directory: \"custom # backlog\" # data folder has no config.yml\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("project_name: Example\n# root Backlog.md config\nbacklog_directory: \"custom # backlog\" # data folder has no config.yml\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	got, ok, err := DiscoverBacklogDir(root)
 	if err != nil || !ok || got != customPath {
 		t.Fatalf("DiscoverBacklogDir=%q %v err=%v, want %q true nil", got, ok, err, customPath)
+	}
+}
+
+func TestDiscoverBacklogDirUsesRootConfigCamelCase(t *testing.T) {
+	root := t.TempDir()
+	customRel := "custom-backlog"
+	customPath := filepath.Join(root, customRel)
+	if err := os.MkdirAll(filepath.Join(customPath, "tasks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("projectName: Example\nbacklogDirectory: "+customRel+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := DiscoverBacklogDir(root)
+	if err != nil || !ok || got != customPath {
+		t.Fatalf("camelCase root config should be honored, got %q %v err=%v, want %q", got, ok, err, customPath)
+	}
+}
+
+func TestDiscoverBacklogDirIgnoresRootConfigWithoutProjectName(t *testing.T) {
+	root := t.TempDir()
+	customRel := "custom-backlog"
+	customPath := filepath.Join(root, customRel)
+	if err := os.MkdirAll(filepath.Join(customPath, "tasks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(root, "backlog")
+	makeBacklogDataDir(t, want)
+	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("backlog_directory: "+customRel+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := DiscoverBacklogDir(root)
+	if err != nil || !ok || got != want {
+		t.Fatalf("root config without project name should be ignored, got %q %v err=%v, want fallback %q", got, ok, err, want)
+	}
+}
+
+func TestDiscoverBacklogDirDoesNotSearchNestedCustomFolder(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "nested")
+	custom := filepath.Join(nested, "custom-backlog")
+	makeBacklogDataDir(t, custom)
+	if err := os.WriteFile(filepath.Join(nested, "backlog.config.yml"), []byte("project_name: Nested\nbacklog_directory: custom-backlog\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := DiscoverBacklogDir(root)
+	if err != nil || ok || got != "" {
+		t.Fatalf("nested root config should not be discovered from worktree root, got %q %v err=%v", got, ok, err)
 	}
 }
 
@@ -579,7 +665,7 @@ func TestDiscoverBacklogDirRootConfigWinsOverFolderLocalBacklog(t *testing.T) {
 		t.Fatal(err)
 	}
 	makeBacklogDataDir(t, filepath.Join(root, "backlog"))
-	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("backlog_directory: "+customRel+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("project_name: Example\nbacklog_directory: "+customRel+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	got, ok, err := DiscoverBacklogDir(root)
@@ -609,7 +695,7 @@ func TestDiscoverBacklogDirUsesRootConfigForBuiltinDirectories(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(want, "tasks"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("backlog_directory: '"+rel+"/' # root config, no folder-local config.yml\n"), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("project_name: Example\nbacklog_directory: '"+rel+"/' # root config, no folder-local config.yml\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			got, ok, err := DiscoverBacklogDir(root)
@@ -637,7 +723,7 @@ func TestDiscoverBacklogDirFallsBackToConfigYAML(t *testing.T) {
 
 func TestDiscoverBacklogDirRootConfigMissingTargetErrors(t *testing.T) {
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("backlog_directory: missing # target is absent\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("project_name: Example\nbacklog_directory: missing # target is absent\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	_, ok, err := DiscoverBacklogDir(root)
@@ -664,7 +750,7 @@ func TestDiscoverBacklogDirRejectsSymlinkedBacklogDirOutsideWorktree(t *testing.
 				t.Skipf("symlink unavailable: %v", err)
 			}
 			if tc.writeRootConfig {
-				if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("backlog_directory: "+tc.rel+"\n"), 0o644); err != nil {
+				if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("project_name: Example\nbacklog_directory: "+tc.rel+"\n"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -699,7 +785,7 @@ func TestDiscoverBacklogDirAcceptsSymlinkedBacklogDirInsideWorktree(t *testing.T
 				t.Skipf("symlink unavailable: %v", err)
 			}
 			if tc.writeRootConfig {
-				if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("backlog_directory: "+tc.rel+"\n"), 0o644); err != nil {
+				if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("project_name: Example\nbacklog_directory: "+tc.rel+"\n"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -737,7 +823,7 @@ func TestCollectTasksDiscoversBuiltInAndRootConfigBacklogDirs(t *testing.T) {
 	makeBacklogDataDir(t, filepath.Join(root, "backlog"))
 	makeBacklogDataDir(t, filepath.Join(hidden, ".backlog"))
 	makeBacklogDataDir(t, filepath.Join(custom, "workflow", "data"))
-	if err := os.WriteFile(filepath.Join(custom, "backlog.config.yml"), []byte("backlog_directory: workflow/data\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(custom, "backlog.config.yml"), []byte("project_name: Example\nbacklog_directory: workflow/data\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	mainTask := sampleTask()
@@ -760,7 +846,7 @@ func TestCollectTasksSkipsNonRootWorktreeWithUnresolvableBacklogDir(t *testing.T
 	root := t.TempDir()
 	other := t.TempDir()
 	makeBacklogDataDir(t, filepath.Join(root, "backlog"))
-	if err := os.WriteFile(filepath.Join(other, "backlog.config.yml"), []byte("backlog_directory: missing\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(other, "backlog.config.yml"), []byte("project_name: Example\nbacklog_directory: missing\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	mainTask := sampleTask()
@@ -773,6 +859,14 @@ func TestCollectTasksSkipsNonRootWorktreeWithUnresolvableBacklogDir(t *testing.T
 	}
 	if len(resolved.Tasks) != 1 || !logContains(logs, "cannot resolve Backlog directory") || !logContains(logs, "does not exist") {
 		t.Fatalf("unresolvable non-root worktree should be skipped with a clear log, tasks=%+v logs=%v", resolved.ByID, logs)
+	}
+}
+
+func TestCollectTasksMainWorktreeWithoutBacklogFolderErrors(t *testing.T) {
+	root := t.TempDir()
+	_, err := CollectTasks(context.Background(), testConfig(root), fakeGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}}}, newFakeBacklog(root), func(string, ...any) {})
+	if err == nil || !strings.Contains(err.Error(), "main worktree") || !strings.Contains(err.Error(), "no Backlog directory found") {
+		t.Fatalf("main worktree without Backlog folder should fail clearly, got %v", err)
 	}
 }
 
@@ -1055,6 +1149,16 @@ func TestSubIssueParentDiffAndExpectedRejectionWarnsOnce(t *testing.T) {
 		t.Fatalf("different parent should remove then add links=%d failed=%d add=%d remove=%d", links, failed, gh.addSubIssueCalls, gh.removeSubIssueCalls)
 	}
 	gh = basicGH(map[string][]Issue{"owner/repo": {parent, child}})
+	gh.parents["C"] = IssueParentInfo{ID: "OLD", Number: 9, Repo: "owner/repo"}
+	gh.removeSubIssueErr = errors.New("remove failed")
+	logs := []string{}
+	app = App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues, nil)
+	if links != 0 || failed != 1 || gh.removeSubIssueCalls != 1 || gh.addSubIssueCalls != 0 || !logContains(logs, "remove sub-issue parent owner/repo#9 failed") {
+		t.Fatalf("remove parent errors should fail only that link links=%d failed=%d add=%d remove=%d logs=%v", links, failed, gh.addSubIssueCalls, gh.removeSubIssueCalls, logs)
+	}
+
+	gh = basicGH(map[string][]Issue{"owner/repo": {parent, child}})
 	gh.parents["C"] = IssueParentInfo{ID: "FOREIGN", Number: 99, Repo: "evil/repo"}
 	app = App{GitHub: gh, Logf: func(string, ...any) {}}
 	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues, nil)
@@ -1066,8 +1170,8 @@ func TestSubIssueParentDiffAndExpectedRejectionWarnsOnce(t *testing.T) {
 	resolved.Tasks = append(resolved.Tasks, Task{ID: "TASK-1.2", ParentTaskID: sp("TASK-1")})
 	issues["task-1.2"] = child2
 	gh = basicGH(map[string][]Issue{"owner/repo": {parent, child, child2}})
-	gh.subIssueErr = errors.New("unsupported")
-	var logs []string
+	gh.subIssueErrs = []error{errors.New("unsupported for this repo"), errors.New("cross-repo relationships are not supported")}
+	logs = nil
 	app = App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
 	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues, nil)
 	if links != 0 || failed != 0 || strings.Count(strings.Join(logs, "\n"), "sub-issue links are not supported") != 1 || gh.addSubIssueCalls != 2 {
@@ -1219,7 +1323,7 @@ func TestGitStatusUsesNoOptionalLocks(t *testing.T) {
 
 func TestExecTaskPrefixFallsBackToRootConfig(t *testing.T) {
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("backlog_directory: custom\ntask_prefix: 'bug' # root setting\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("project_name: Example\nbacklog_directory: custom\ntask_prefix: 'bug' # root setting\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	prefix, err := (ExecBacklog{Runner: &scriptRunner{outputs: map[string][]byte{}}}).TaskPrefix(context.Background(), root)
@@ -1268,9 +1372,12 @@ func TestExecParsersAndJSONShapes(t *testing.T) {
 	if err != nil || parent.Repo != "owner/repo" || parent.Number != 4 || parent.ID != "PARENT" {
 		t.Fatalf("IssueParent parse=%+v err=%v", parent, err)
 	}
+	if err := gh.RemoveSubIssue(context.Background(), "evil/repo", "PARENT", "CHILD"); err == nil || !strings.Contains(err.Error(), "unconfigured repo evil/repo") {
+		t.Fatalf("RemoveSubIssue should enforce parent repo allowlist, got %v", err)
+	}
 }
 
-func TestTaskViewJSONFixtureFieldNames(t *testing.T) {
+func TestBacklogJSONFixtureFieldNames(t *testing.T) {
 	for _, name := range []string{"testdata/task-view-task-16.json", "testdata/task-view-with-reference.json"} {
 		data, err := os.ReadFile(name)
 		if err != nil {
@@ -1286,6 +1393,18 @@ func TestTaskViewJSONFixtureFieldNames(t *testing.T) {
 		if name == "testdata/task-view-with-reference.json" && (len(resp.Task.References) == 0 || resp.Task.Project == nil || resp.Task.Priority == nil) {
 			t.Fatalf("synthetic reference fixture missing references/project/priority: %+v", resp.Task)
 		}
+	}
+
+	data, err := os.ReadFile("testdata/task-list.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var list TaskListResponse
+	if err := json.Unmarshal(data, &list); err != nil {
+		t.Fatalf("task-list fixture unmarshal: %v", err)
+	}
+	if len(list.Tasks) != 2 || list.Tasks[0].ID != "TASK-1" || list.Tasks[0].Milestone == nil || list.Tasks[1].UpdatedAt == nil || list.Total == nil || *list.Total != 10 || list.NextSkip == nil || *list.NextSkip != 2 {
+		t.Fatalf("task-list fixture missing expected captured fields: %+v", list)
 	}
 }
 
@@ -1380,6 +1499,7 @@ type fakeBacklog struct {
 	statuses      []string
 	tasksByDir    map[string][]Task
 	createdID     string
+	createdIDs    []string
 	created       []Task
 	pushed        bool
 	pushCount     int
@@ -1457,11 +1577,16 @@ func (b *fakeBacklog) CreateTask(_ context.Context, dir string, in CreateTaskInp
 	if b.createErr != nil {
 		return "", b.createErr
 	}
+	id := b.createdID
+	if len(b.createdIDs) > 0 {
+		id = b.createdIDs[0]
+		b.createdIDs = b.createdIDs[1:]
+	}
 	p := in.Project
-	task := Task{ID: b.createdID, Title: in.Title, Description: in.Description, Labels: in.Labels, Status: "To Do", Project: &p, References: in.References}
+	task := Task{ID: id, Title: in.Title, Description: in.Description, Labels: in.Labels, Status: "To Do", Project: &p, References: in.References}
 	b.created = append(b.created, task)
 	b.tasksByDir[dir] = append(b.tasksByDir[dir], task)
-	return b.createdID, nil
+	return id, nil
 }
 func (b *fakeBacklog) Push(context.Context, string, string) error {
 	b.pushed = true
@@ -1484,6 +1609,7 @@ type fakeGitHub struct {
 	addSubIssueCalls         int
 	removeSubIssueCalls      int
 	subIssueErr              error
+	subIssueErrs             []error
 	removeSubIssueErr        error
 	updateErr                error
 	addProjectItemErr        error
@@ -1621,6 +1747,13 @@ func (g *fakeGitHub) AddSubIssue(_ context.Context, parentRepo string, parentNum
 		return errors.New("unexpected write")
 	}
 	g.addSubIssueCalls++
+	if len(g.subIssueErrs) > 0 {
+		err := g.subIssueErrs[0]
+		g.subIssueErrs = g.subIssueErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	if g.subIssueErr != nil {
 		return g.subIssueErr
 	}
@@ -1639,7 +1772,7 @@ func (g *fakeGitHub) AddSubIssue(_ context.Context, parentRepo string, parentNum
 	}
 	return nil
 }
-func (g *fakeGitHub) RemoveSubIssue(_ context.Context, _ string, childNodeID string) error {
+func (g *fakeGitHub) RemoveSubIssue(_ context.Context, _ string, _ string, childNodeID string) error {
 	if g.failOnWrite {
 		return errors.New("unexpected write")
 	}

@@ -144,6 +144,13 @@ func readTaskPrefixFromRootConfig(root string) (string, bool, error) {
 	if err != nil {
 		return "", false, fmt.Errorf("read %s: %w", configPath, err)
 	}
+	hasProjectName, err := rootConfigHasProjectName(data)
+	if err != nil {
+		return "", false, fmt.Errorf("parse %s: %w", configPath, err)
+	}
+	if !hasProjectName {
+		return "", false, nil
+	}
 	prefix, ok, err := parseRootConfigValue(data, "task_prefix")
 	if err != nil {
 		return "", false, fmt.Errorf("parse %s: %w", configPath, err)
@@ -618,7 +625,10 @@ func (g ExecGitHub) AddSubIssue(ctx context.Context, parentRepo string, parentNu
 	_, err := g.ghJSON(ctx, []string{"api", "-X", "POST", fmt.Sprintf("repos/%s/issues/%d/sub_issues", parentRepo, parentNumber), "--input", "-"}, map[string]any{"sub_issue_id": childDatabaseID})
 	return err
 }
-func (g ExecGitHub) RemoveSubIssue(ctx context.Context, parentNodeID string, childNodeID string) error {
+func (g ExecGitHub) RemoveSubIssue(ctx context.Context, parentRepo string, parentNodeID string, childNodeID string) error {
+	if err := g.checkRepo(parentRepo); err != nil {
+		return err
+	}
 	query := `mutation($parent:ID!, $child:ID!) { removeSubIssue(input:{issueId:$parent, subIssueId:$child}) { issue { id } } }`
 	payload := map[string]any{"query": query, "variables": map[string]any{"parent": parentNodeID, "child": childNodeID}}
 	_, err := g.ghJSON(ctx, []string{"api", "graphql", "--input", "-"}, payload)
