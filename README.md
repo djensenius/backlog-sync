@@ -1,6 +1,6 @@
 # Backlog Sync
 
-`backlog-sync` mirrors local [Backlog.md](https://github.com/MrLesk/Backlog.md) tasks one-way to GitHub Issues and a GitHub Project v2. Backlog.md remains the source of truth: changes made directly on mirrored GitHub issues are overwritten on the next sync, except for the explicit `inbox` import path.
+`backlog-sync` mirrors local [Backlog.md](https://github.com/MrLesk/Backlog.md) tasks one-way to GitHub Issues and a GitHub Project v2. Backlog.md remains the source of truth for mirrored issue fields such as title, body, state, managed labels, Project fields, and sub-issue links. Unmanaged GitHub labels and comments are preserved, except for the explicit `inbox` import path.
 
 The command is generic. The JSON config describes the GitHub targets and optional sync settings; it does not, by its location alone, choose which local repository is scanned. With reusable configs that omit `root`, `backlog-sync` scans the git repository for the current directory unless `--root <path>` is passed. The same binary can run multiple independent configs for single-repo or multi-repo consumers.
 
@@ -204,7 +204,7 @@ The config file is strict JSON. Unknown fields are rejected. JSON comments are n
 
 | Field | Type | Required/default | Meaning |
 | --- | --- | --- | --- |
-| `root` | string | Optional; used when set and `--root` is absent; otherwise defaults to the git top-level of the current directory; overridden by `--root` | Main worktree root to scan and use for git operations. Omit it from committed reusable configs when possible. |
+| `root` | string | Optional; used after config load when `--root` is absent; overridden by `--root` | Main worktree root to scan and use for git operations. Without `--root`, startup still begins from the current directory's git top-level so the command must be launched inside a git checkout before a config `root` can be read. Omit it from committed reusable configs when possible. |
 | `projectOwner` | string | Required | User or organization login that owns the GitHub Project v2. |
 | `projectOwnerType` | string | Optional; default `user`; valid values `user`, `org` | Selects whether `projectOwner` is queried as a user or organization. |
 | `projectNumber` | number | Required | Project v2 number, not the Project node ID. |
@@ -275,7 +275,7 @@ The GitHub Project `Status` field is always required. These optional fields are 
 
 For every run, it:
 
-1. Resolves the root worktree from `--root`; otherwise from config `root` after loading the config; otherwise from the git top-level of the current directory. The config file's directory is not used as the root unless it is also the current-directory git top-level or is named by `root`/`--root`.
+1. Resolves the root worktree from `--root` when provided. Without `--root`, startup first resolves the git top-level of the current directory so the command must be launched inside a git checkout; after the config is loaded, config `root` replaces that current-directory root when set. The config file's directory is not used as the root unless it is also the current-directory git top-level or is named by `root`/`--root`.
 2. Runs `git -C <root> worktree list --porcelain`.
 3. Skips bare, prunable, missing, and Backlog-less worktrees.
 4. Discovers the Backlog data directory the same way the Backlog CLI would when invoked from each worktree root: root `backlog.config.yml` `backlog_directory`, then `backlog/`, then `.backlog/`.

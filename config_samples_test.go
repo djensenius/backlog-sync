@@ -74,6 +74,34 @@ func TestLoadConfigRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsTrailingData(t *testing.T) {
+	base := `{
+  "projectOwner": "OWNER_LOGIN",
+  "projectOwnerType": "user",
+  "projectNumber": 1,
+  "defaultRepo": "OWNER_LOGIN/REPOSITORY_NAME",
+  "mainBranch": "main"
+}`
+	for _, tc := range []struct {
+		name string
+		data string
+	}{
+		{name: "second-json-value", data: base + ` {"projectOwner":"OTHER"}`},
+		{name: "comment", data: base + ` // comment`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(tc.data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := loadConfig(path)
+			if err == nil {
+				t.Fatalf("loadConfig accepted trailing data for %s", tc.name)
+			}
+		})
+	}
+}
+
 func assertOmittedRootOnlyKeys(t *testing.T, samplePath string, raw map[string]any) {
 	t.Helper()
 	for _, key := range []string{"root", "lockFile"} {
