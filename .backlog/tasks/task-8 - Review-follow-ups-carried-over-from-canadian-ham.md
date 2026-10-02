@@ -1,9 +1,11 @@
 ---
 id: TASK-8
 title: Review follow-ups carried over from canadian-ham
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@david'
 created_date: '2026-10-01 15:19'
+updated_date: '2026-10-02 01:16'
 labels:
   - bug
   - hardening
