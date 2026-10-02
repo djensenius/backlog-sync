@@ -53,4 +53,6 @@ Implemented standalone generic README/config reference and added README link/sta
 Starting review-fix pass after reviewer REQUEST CHANGES. Scope limited to README/docs/tests unless a tiny fixture update is required; no runtime root/config/launchd behavior changes planned.
 
 Review-fix docs/tests implemented. Evidence so far: targeted README/config sample tests passed with go test ./... -run 'Test(ReadmeConfigExamplesMatchSampleFiles|ReadmeLinksToSampleConfigs|ReadmeLocalMarkdownLinksResolve|ReadmeHasNoConsumerSpecificPaths|SampleConfigsParseStrictlyWithoutNetwork)' (ok github.com/djensenius/backlog-sync 0.230s); go test ./... passed (ok github.com/djensenius/backlog-sync 0.766s); go vet ./... passed with no output. Acceptance criteria intentionally left unchecked until coordinator finalization.
+
+Final review-fix validation after README root-row wording adjustment: targeted README/config sample tests passed (ok github.com/djensenius/backlog-sync 0.135s); go test ./... passed (ok github.com/djensenius/backlog-sync cached); go vet ./... passed with no output. No acceptance criteria checked or status finalized in this pass.
 <!-- SECTION:NOTES:END -->
