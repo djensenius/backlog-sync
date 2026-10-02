@@ -1,0 +1,22 @@
+{
+  "projectOwner": "djensenius",
+  "projectOwnerType": "user",
+  "projectNumber": 11,
+  "repos": {},
+  "defaultRepo": "djensenius/backlog-sync",
+  "mainBranch": "main",
+  "statusMap": {},
+  "inbox": {
+    "enabled": true,
+    "label": "inbox",
+    "mode": "manual"
+  },
+  "adoptReferencedIssues": false,
+  "labels": {
+    "managed": ["*"],
+    "addAlways": []
+  },
+  "fields": {},
+  "subIssues": true,
+  "timeoutSeconds": 60
+}
