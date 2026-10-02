@@ -484,6 +484,87 @@ func TestInboxPushOversizedMarkerBodyRecordsFailureAndContinues(t *testing.T) {
 	}
 }
 
+func TestInboxMarkedDuplicateLoserOnlyStripsInboxLabel(t *testing.T) {
+	ctx := context.Background()
+	root := tempRoot(t)
+	task := sampleTask()
+	task.ParentTaskID = nil
+	task.Dependencies = nil
+	task.Subtasks = nil
+	cfg := testConfig(root)
+	cfg.SubIssues = false
+	winner := Issue{Number: 7, DatabaseID: 7, NodeID: "I_7", HTMLURL: "https://github.com/owner/repo/issues/7", Title: "stale winner", Body: MarkerFor(task.ID) + "\nstale winner", State: "open", Repo: "owner/repo", Labels: []IssueLabel{{Name: "backlog"}}}
+	loser := Issue{Number: 8, DatabaseID: 8, NodeID: "I_8", HTMLURL: "https://github.com/owner/repo/issues/8", Title: "stale loser", Body: MarkerFor(task.ID) + "\nstale loser", State: "open", Repo: "owner/repo", Labels: []IssueLabel{{Name: "inbox"}, {Name: "external"}}}
+	bl := newFakeBacklog(root, task)
+	gh := basicGH(map[string][]Issue{"owner/repo": {winner, loser}})
+	var logs []string
+	app := App{Git: fakeGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}}, rootClean: true}, Backlog: bl, GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	c, err := app.Run(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Imported != 0 || c.Created != 0 {
+		t.Fatalf("duplicate marked inbox issue should not import or create, counters=%+v", c)
+	}
+	winnerAfter := gh.issues["owner/repo"][0]
+	if winnerAfter.Title != IssueTitle(task) || !strings.HasPrefix(winnerAfter.Body, MarkerFor(task.ID)+"\nMirrored one-way") {
+		t.Fatalf("marker-index winner should remain canonical and be mirrored: %+v", winnerAfter)
+	}
+	loserAfter := gh.issues["owner/repo"][1]
+	if loserAfter.Title != loser.Title || loserAfter.Body != loser.Body || hasLabelFold(loserAfter, "inbox") {
+		t.Fatalf("duplicate-marker loser should only lose inbox label, got %+v", loserAfter)
+	}
+	if !hasLabelFold(loserAfter, "external") {
+		t.Fatalf("duplicate-marker loser should preserve non-inbox labels: %+v", loserAfter)
+	}
+	if !logContains(logs, "marker index chose owner/repo#7") {
+		t.Fatalf("missing duplicate-marker loser warning: %v", logs)
+	}
+}
+
+func TestInboxCreatedTaskIDCollisionLeavesIssueUnmarkedAndContinues(t *testing.T) {
+	ctx := context.Background()
+	root := tempRoot(t)
+	cfg := testConfig(root)
+	cfg.Inbox.Push = true
+	cfg.SubIssues = false
+	existingTask := sampleTask()
+	existingTask.ParentTaskID = nil
+	existingTask.Dependencies = nil
+	existingTask.Subtasks = nil
+	existingBody := RenderIssueBodyWithOptions(existingTask, RenderOptions{Milestones: map[string]string{"m-0": "v1 release"}, MainBranch: cfg.MainBranch})
+	existingIssue := Issue{Number: 1, DatabaseID: 1, NodeID: "I_1", HTMLURL: "https://github.com/owner/repo/issues/1", Title: IssueTitle(existingTask), Body: existingBody, State: "open", Repo: "owner/repo", Labels: labelsToIssueLabels(DesiredLabels(existingTask, Issue{}, cfg))}
+	marked := Issue{Number: 5, DatabaseID: 5, NodeID: "I_5", HTMLURL: "https://github.com/owner/repo/issues/5", Title: "Existing marked", Body: MarkerFor("TASK-99") + "\nexisting", State: "open", Repo: "owner/repo", Labels: []IssueLabel{{Name: "backlog"}}}
+	collisionInbox := Issue{Number: 40, DatabaseID: 40, NodeID: "I_40", HTMLURL: "https://github.com/owner/repo/issues/40", Title: "Collides", Body: "colliding body", State: "open", Repo: "owner/repo", Labels: []IssueLabel{{Name: "inbox"}}}
+	okInbox := Issue{Number: 41, DatabaseID: 41, NodeID: "I_41", HTMLURL: "https://github.com/owner/repo/issues/41", Title: "Imports", Body: "ok body", State: "open", Repo: "owner/repo", Labels: []IssueLabel{{Name: "inbox"}}}
+	bl := newFakeBacklog(root, existingTask)
+	bl.createdIDs = []string{"TASK-99", "TASK-100"}
+	gh := basicGH(map[string][]Issue{"owner/repo": {existingIssue, marked, collisionInbox, okInbox}})
+	var logs []string
+	app := App{Git: fakeGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}}, rootClean: true}, Backlog: bl, GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	c, err := app.Run(ctx, cfg)
+	if err == nil || !strings.Contains(err.Error(), "1 task sync operation(s) failed") || c.Imported != 2 || c.Failed != 1 {
+		t.Fatalf("task ID collision should be one per-task failure while continuing, counters=%+v err=%v logs=%v", c, err, logs)
+	}
+	if len(bl.created) != 2 {
+		t.Fatalf("expected both inbox tasks to be created before marking decisions, got %d", len(bl.created))
+	}
+	collidedAfter := gh.issues["owner/repo"][2]
+	if collidedAfter.Title != collisionInbox.Title || collidedAfter.Body != collisionInbox.Body || !hasLabelFold(collidedAfter, "inbox") {
+		t.Fatalf("colliding inbox issue should stay unmarked with inbox label: %+v", collidedAfter)
+	}
+	importedAfter := gh.issues["owner/repo"][3]
+	if !strings.HasPrefix(importedAfter.Title, "task-100:") || !strings.HasPrefix(importedAfter.Body, MarkerFor("TASK-100")+"\n") || hasLabelFold(importedAfter, "inbox") {
+		t.Fatalf("later inbox issue should still be marked/imported: %+v", importedAfter)
+	}
+	if bl.pushCount != 1 {
+		t.Fatalf("successful inbox creation should still push once, pushCount=%d", bl.pushCount)
+	}
+	if !logContains(logs, "task-99 import inbox issue owner/repo#40 failed: task ID already has marked issue owner/repo#5") {
+		t.Fatalf("missing task ID collision failure log: %v", logs)
+	}
+}
+
 func TestInboxManualModeReportsNeedsTriageWithoutWrites(t *testing.T) {
 	ctx := context.Background()
 	root := tempRoot(t)
@@ -1403,8 +1484,18 @@ func TestBacklogJSONFixtureFieldNames(t *testing.T) {
 	if err := json.Unmarshal(data, &list); err != nil {
 		t.Fatalf("task-list fixture unmarshal: %v", err)
 	}
+	r := &scriptRunner{outputs: map[string][]byte{
+		"backlog task list --json --max-count 2 --skip 0": data,
+	}}
+	execList, err := (ExecBacklog{Runner: r}).ListTasks(context.Background(), "/repo", 2, 0)
+	if err != nil {
+		t.Fatalf("ExecBacklog.ListTasks fixture parse: %v", err)
+	}
 	if len(list.Tasks) != 2 || list.Tasks[0].ID != "TASK-1" || list.Tasks[0].Milestone == nil || list.Tasks[1].UpdatedAt == nil || list.Total == nil || *list.Total != 10 || list.NextSkip == nil || *list.NextSkip != 2 {
 		t.Fatalf("task-list fixture missing expected captured fields: %+v", list)
+	}
+	if len(execList.Tasks) != len(list.Tasks) || execList.Tasks[0].ID != list.Tasks[0].ID || execList.NextSkip == nil || *execList.NextSkip != *list.NextSkip {
+		t.Fatalf("ExecBacklog.ListTasks fixture mismatch: got %+v want %+v", execList, list)
 	}
 }
 

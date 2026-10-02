@@ -483,6 +483,13 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 			continue
 		}
 		if id, ok := ParseMarkerWithPrefix(issue.Body, cfg.TaskPrefix); ok {
+			if existing, chosen := markerIssues[id]; chosen && !sameIssue(existing, issue) {
+				a.Logf("warning: refusing to make inbox issue %s#%d canonical for %s because the marker index chose %s#%d; removing only inbox label", issue.Repo, issue.Number, id, existing.Repo, existing.Number)
+				if err := a.stripInboxLabel(ctx, cfg, issue); err != nil {
+					return imported, triage, linked, failed, err
+				}
+				continue
+			}
 			labels := removeLabelFold(LabelsOf(issue), cfg.Inbox.Label)
 			patch := IssuePatch{Labels: &labels}
 			a.LogAction(cfg.DryRun, "remove inbox label from mirrored issue %s#%d (%s)", issue.Repo, issue.Number, id)
@@ -544,6 +551,12 @@ func (a *App) processInbox(ctx context.Context, cfg Config, issues []Issue, mark
 			}
 		} else {
 			a.Logf("reuse existing referenced task %s for issue %s#%d", CanonicalTaskID(taskID), issue.Repo, issue.Number)
+		}
+		canonicalTaskID = CanonicalTaskID(taskID)
+		if existing, ok := markerIssues[canonicalTaskID]; ok && !sameIssue(existing, issue) {
+			failed++
+			a.Logf("error: %s import inbox issue %s#%d failed: task ID already has marked issue %s#%d; leaving inbox issue unmarked", canonicalTaskID, issue.Repo, issue.Number, existing.Repo, existing.Number)
+			continue
 		}
 		if cfg.DryRun {
 			continue
