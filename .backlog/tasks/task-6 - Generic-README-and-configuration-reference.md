@@ -1,11 +1,11 @@
 ---
 id: TASK-6
 title: Generic README and configuration reference
-status: In Progress
+status: Done
 assignee:
   - '@david'
 created_date: '2026-10-01 15:18'
-updated_date: '2026-10-02 01:41'
+updated_date: '2026-10-02 01:53'
 labels:
   - docs
 milestone: m-0
@@ -23,9 +23,9 @@ The README was written while the tool lived inside canadian-ham and still uses t
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The README covers installation (Homebrew, go install, release archives), GitHub prerequisites (gh scopes incl. project, creating the Project and Status options), the full config reference with a single-repo and a multi-repo example, inbox modes, dry runs, launchd per config, and the cross-branch behaviour of the backlog CLI
-- [ ] #2 No consumer-specific absolute paths remain except in clearly labelled examples
-- [ ] #3 Markdown links resolve
+- [x] #1 The README covers installation (Homebrew, go install, release archives), GitHub prerequisites (gh scopes incl. project, creating the Project and Status options), the full config reference with a single-repo and a multi-repo example, inbox modes, dry runs, launchd per config, and the cross-branch behaviour of the backlog CLI
+- [x] #2 No consumer-specific absolute paths remain except in clearly labelled examples
+- [x] #3 Markdown links resolve
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -55,4 +55,12 @@ Starting review-fix pass after reviewer REQUEST CHANGES. Scope limited to README
 Review-fix docs/tests implemented. Evidence so far: targeted README/config sample tests passed with go test ./... -run 'Test(ReadmeConfigExamplesMatchSampleFiles|ReadmeLinksToSampleConfigs|ReadmeLocalMarkdownLinksResolve|ReadmeHasNoConsumerSpecificPaths|SampleConfigsParseStrictlyWithoutNetwork)' (ok github.com/djensenius/backlog-sync 0.230s); go test ./... passed (ok github.com/djensenius/backlog-sync 0.766s); go vet ./... passed with no output. Acceptance criteria intentionally left unchecked until coordinator finalization.
 
 Final review-fix validation after README root-row wording adjustment: targeted README/config sample tests passed (ok github.com/djensenius/backlog-sync 0.135s); go test ./... passed (ok github.com/djensenius/backlog-sync cached); go vet ./... passed with no output. No acceptance criteria checked or status finalized in this pass.
+
+Coordinator finalization validation after independent APPROVE WITH NOTES review: targeted README/config tests passed (`go test ./... -run 'Test(ReadmeConfigExamplesMatchSampleFiles|ReadmeLinksToSampleConfigs|ReadmeLocalMarkdownLinksResolve|ReadmeHasNoConsumerSpecificPaths|SampleConfigsParseStrictlyWithoutNetwork)'`); `go test ./...` passed; `go vet ./...` passed with no output. Reviewer confirmed the README covers required install/prerequisite/config/inbox/dry-run/launchd/cross-branch sections, contains no consumer-specific paths, and local links resolve.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Rewrote README into a standalone backlog-sync guide with generic install paths, GitHub prerequisites, full config reference, single- and multi-repo examples, inbox mode behavior, dry-run guidance, launchd-per-config instructions, and cross-branch/root behavior. Added README checks for sample links, local links, consumer-specific path leakage, and fenced JSON example drift against examples/*.json. Addressed review findings around current-directory/root safety, launchd WorkingDirectory limitations, draft release publication, and detailed inbox semantics. Verified with targeted README/config tests, `go test ./...`, `go vet ./...`, and independent review APPROVE WITH NOTES.
+<!-- SECTION:FINAL_SUMMARY:END -->
