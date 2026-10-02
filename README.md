@@ -2,7 +2,7 @@
 
 `backlog-sync` mirrors local [Backlog.md](https://github.com/MrLesk/Backlog.md) tasks one-way to GitHub Issues and a GitHub Project v2. Backlog.md remains the source of truth: changes made directly on mirrored GitHub issues are overwritten on the next sync, except for the explicit `inbox` import path.
 
-The command is generic. It does not know about any consumer repository until you point it at a JSON config with `--config <path>` (default: `<root>/.backlog-sync.json`). The same binary can run multiple independent configs for single-repo or multi-repo consumers.
+The command is generic. The JSON config describes the GitHub targets and optional sync settings; it does not, by its location alone, choose which local repository is scanned. With reusable configs that omit `root`, `backlog-sync` scans the git repository for the current directory unless `--root <path>` is passed. The same binary can run multiple independent configs for single-repo or multi-repo consumers.
 
 > Caution: task titles, descriptions, acceptance criteria, plans, notes, metadata, and final summaries are copied into the configured issue repository. If that repository is public, the task text becomes public.
 
@@ -42,7 +42,7 @@ backlog-sync --version
 
 ### Release archives
 
-Tagged versions publish GitHub release archives for macOS and Linux on `amd64` and `arm64`. Each archive contains:
+Tagged versions are packaged by GoReleaser as draft GitHub releases for macOS and Linux on `amd64` and `arm64`. A maintainer must publish the draft release before public download links work and before the Homebrew tap can publish the new version. Each archive contains:
 
 - the `backlog-sync` binary
 - `README.md`
@@ -104,12 +104,19 @@ Run from a checkout or worktree that contains Backlog.md data.
    - [examples/minimal-single-repo.json](examples/minimal-single-repo.json) mirrors all tasks to one issue repository.
    - [examples/multi-repo.json](examples/multi-repo.json) routes Backlog task `project` values to different issue repositories through `repos`.
 
-2. Save it as `.backlog-sync.json` in the consumer repository or at another private path.
+2. Save it as `.backlog-sync.json` in the consumer repository for reusable CLI and launchd setups. For one-off CLI runs, the config can live at another private path, but the config file's directory does not select the repository to scan.
 3. Replace placeholder owner, repository, and project values.
-4. Start with a dry run:
+4. Start with a dry run from the consumer repository:
 
    ```bash
-   backlog-sync --config /path/to/consumer-repo/.backlog-sync.json --dry-run --verbose
+   cd /path/to/consumer-repo
+   backlog-sync --config .backlog-sync.json --dry-run --verbose
+   ```
+
+   Or pass the repository explicitly when running from another directory:
+
+   ```bash
+   backlog-sync --root /path/to/consumer-repo --config /path/to/private/backlog-sync.json --dry-run --verbose
    ```
 
 5. When the dry run is clean, run without `--dry-run`.
@@ -197,7 +204,7 @@ The config file is strict JSON. Unknown fields are rejected. JSON comments are n
 
 | Field | Type | Required/default | Meaning |
 | --- | --- | --- | --- |
-| `root` | string | Optional; defaults to `--root`, or the git top-level of the current directory | Main worktree root to scan and use for git operations. Omit it from committed reusable configs when possible. |
+| `root` | string | Optional; used when set and `--root` is absent; otherwise defaults to the git top-level of the current directory; overridden by `--root` | Main worktree root to scan and use for git operations. Omit it from committed reusable configs when possible. |
 | `projectOwner` | string | Required | User or organization login that owns the GitHub Project v2. |
 | `projectOwnerType` | string | Optional; default `user`; valid values `user`, `org` | Selects whether `projectOwner` is queried as a user or organization. |
 | `projectNumber` | number | Required | Project v2 number, not the Project node ID. |
@@ -215,6 +222,16 @@ The config file is strict JSON. Unknown fields are rejected. JSON comments are n
 
 Runtime-only flags (`--dry-run`, `--no-inbox`, `--verbose`, and `--version`) are not JSON fields. `--repo`, `--project-owner`, `--project-owner-type`, `--project-number`, and `--main-branch` override their matching config values for local testing.
 
+### Root and config path resolution
+
+`--config` chooses which JSON file to load. Its directory does not choose the repository to scan.
+
+- With `--root /path/to/repo`, the command scans that repository root. The flag also overrides any `root` value inside the config.
+- Without `--root`, the command first resolves the git top-level of the current directory. If `--config` is omitted, it loads `<current-git-top-level>/.backlog-sync.json`.
+- After loading the config, a `root` field in the config replaces the current-directory git top-level. If the config omits `root`, the current-directory git top-level remains the scanned repository.
+
+For reusable configs, prefer omitting `root` and running either `cd /path/to/consumer-repo && backlog-sync --config .backlog-sync.json ...` or `backlog-sync --root /path/to/consumer-repo --config /path/to/config.json ...`.
+
 ### `inbox`
 
 | Field | Type | Default | Meaning |
@@ -224,9 +241,9 @@ Runtime-only flags (`--dry-run`, `--no-inbox`, `--verbose`, and `--version`) are
 | `mode` | string | `push`; valid values `manual`, `push` | Selects report-only triage or direct Backlog task creation. New configs should normally use `manual`. |
 | `push` | boolean | `false` | Legacy switch honored only in `push` mode. When true and tasks were imported, the tool runs `git push origin <mainBranch>` after local Backlog changes. |
 
-`manual` mode is report-only for new, unmarked inbox issues. The sync logs each issue as needing triage, claims it for that run so no adoption or sub-issue write touches it, and leaves the issue unchanged. A coordinator should create or update a normal Backlog task with the issue reference, then remove the inbox label by hand or intentionally add a task marker.
+`manual` mode is report-only for new, unmarked inbox issues. The sync logs each issue as needing triage, claims it for that run so no adoption or sub-issue write touches it, and leaves the issue unchanged. A coordinator should create or update a normal Backlog task with the issue reference, then remove the inbox label by hand or intentionally add a task marker. If an issue already has both the inbox label and a Backlog marker, it mirrors normally and keeps the inbox label in manual mode.
 
-`push` mode creates Backlog tasks directly for new inbox issues. It requires the root worktree to be on `mainBranch`, not in the middle of merge/rebase/cherry-pick, and clean in both worktree and index. It creates a task with `--ref <issue URL>`, reverse-maps the issue repository to a Backlog `project` value when possible, removes the inbox label, adds the task marker to the issue, and retitles the issue. Existing tasks are not modified.
+`push` mode creates Backlog tasks directly for new inbox issues. It checks the root worktree once per run; when the root is not on `mainBranch`, is in the middle of merge/rebase/cherry-pick, or has dirty worktree/index changes, each unmarked inbox issue is logged and skipped instead of failing the whole run. For an unmarked issue that is ready to import, push mode creates a task with `--ref <issue URL>`, reverse-maps the issue repository to a Backlog `project` value when possible, removes the inbox label, adds the task marker to the issue, and retitles the issue. If an existing Backlog task already references the issue URL, push mode reuses that task instead of creating another one. If an already marked issue still has the inbox label, push mode mirrors it normally and removes only the inbox label.
 
 `--no-inbox` skips inbox processing for a run regardless of config.
 
@@ -258,7 +275,7 @@ The GitHub Project `Status` field is always required. These optional fields are 
 
 For every run, it:
 
-1. Resolves the root worktree from `--root`, config `root`, or the current git top-level.
+1. Resolves the root worktree from `--root`; otherwise from config `root` after loading the config; otherwise from the git top-level of the current directory. The config file's directory is not used as the root unless it is also the current-directory git top-level or is named by `root`/`--root`.
 2. Runs `git -C <root> worktree list --porcelain`.
 3. Skips bare, prunable, missing, and Backlog-less worktrees.
 4. Discovers the Backlog data directory the same way the Backlog CLI would when invoked from each worktree root: root `backlog.config.yml` `backlog_directory`, then `backlog/`, then `.backlog/`.
@@ -293,17 +310,23 @@ When `subIssues` is true, the tool checks each child issue's current GitHub pare
 
 ## Dry runs
 
-Use `--dry-run` before enabling a new config or changing mappings:
+Use `--dry-run` before enabling a new config or changing mappings. Run from the consumer repository, or pass `--root` explicitly:
 
 ```bash
-backlog-sync --config /path/to/consumer-repo/.backlog-sync.json --dry-run --verbose
+cd /path/to/consumer-repo
+backlog-sync --config .backlog-sync.json --dry-run --verbose
+
+# From another directory:
+backlog-sync --root /path/to/consumer-repo --config /path/to/private/backlog-sync.json --dry-run --verbose
 ```
 
-Dry runs still read git worktrees, Backlog data, GitHub issues, and Project metadata, but they make no GitHub, Backlog, or git writes. Planned writes are printed as log lines. The command still validates Project Status options and config safety before it would write.
+Dry runs still read git worktrees, Backlog data, GitHub issues, and Project metadata from the resolved root repository. The `--config` path alone does not select that repository. Dry runs make no GitHub, Backlog, or git writes. Planned writes are printed as log lines. The command still validates Project Status options and config safety before it would write.
 
 ## launchd per config
 
 On macOS, use `install-launchd.sh` to render one LaunchAgent plist per config. The script writes `~/Library/LaunchAgents/<label>.plist` and does not call `launchctl` unless `--load` is passed.
+
+Current behavior: the generated plist sets `WorkingDirectory` to the config file's directory and runs `backlog-sync --config <path>` without `--root`. Because `--config` alone does not select the scan root, launchd configs should live in the consumer repository (normally as `/path/to/consumer-repo/.backlog-sync.json`) so the job starts inside that git repository. Do not point this installer at a private config outside the consumer repo unless you also maintain a custom plist/script that sets the working directory or passes `--root`.
 
 Example placeholder paths:
 
@@ -339,8 +362,8 @@ The plist appends stdout and stderr to the same log file. Configure log rotation
 ## Flags
 
 ```text
---config              JSON config path (default: <root>/.backlog-sync.json)
---root                repository root/main worktree (default: git top-level of cwd)
+--config              JSON config path (default: <resolved-root>/.backlog-sync.json; does not select root by path)
+--root                repository root/main worktree (default: git top-level of cwd, unless config root is set)
 --repo                override defaultRepo
 --project-owner       override projectOwner
 --project-owner-type  override Project owner type: user or org

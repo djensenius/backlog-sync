@@ -134,6 +134,57 @@ func TestReadmeLinksToSampleConfigs(t *testing.T) {
 	}
 }
 
+func TestReadmeConfigExamplesMatchSampleFiles(t *testing.T) {
+	readme, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sample := range []struct {
+		heading string
+		path    string
+	}{
+		{heading: "### Single-repo config example", path: "examples/minimal-single-repo.json"},
+		{heading: "### Multi-repo config example", path: "examples/multi-repo.json"},
+	} {
+		t.Run(sample.path, func(t *testing.T) {
+			got, ok := readmeJSONBlockAfterHeading(string(readme), sample.heading)
+			if !ok {
+				t.Fatalf("README.md missing fenced json block after %q", sample.heading)
+			}
+			want, err := os.ReadFile(sample.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.TrimSpace(got) != strings.TrimSpace(string(want)) {
+				t.Fatalf("README.md fenced json block after %q does not match %s", sample.heading, sample.path)
+			}
+		})
+	}
+}
+
+func readmeJSONBlockAfterHeading(readme, heading string) (string, bool) {
+	start := strings.Index(readme, heading)
+	if start < 0 {
+		return "", false
+	}
+	afterHeading := readme[start+len(heading):]
+	fenceStart := strings.Index(afterHeading, "```json")
+	if fenceStart < 0 {
+		return "", false
+	}
+	afterFence := afterHeading[fenceStart+len("```json"):]
+	if strings.HasPrefix(afterFence, "\r\n") {
+		afterFence = strings.TrimPrefix(afterFence, "\r\n")
+	} else {
+		afterFence = strings.TrimPrefix(afterFence, "\n")
+	}
+	fenceEnd := strings.Index(afterFence, "\n```")
+	if fenceEnd < 0 {
+		return "", false
+	}
+	return afterFence[:fenceEnd], true
+}
+
 func TestReadmeLocalMarkdownLinksResolve(t *testing.T) {
 	readme, err := os.ReadFile("README.md")
 	if err != nil {
