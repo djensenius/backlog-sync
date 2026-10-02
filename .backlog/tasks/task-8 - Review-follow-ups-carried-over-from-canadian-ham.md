@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@david'
 created_date: '2026-10-01 15:19'
-updated_date: '2026-10-02 01:37'
+updated_date: '2026-10-02 01:58'
 labels:
   - bug
   - hardening
@@ -49,6 +49,8 @@ Implemented review follow-ups and verified with targeted tests plus full validat
 Reviewer REQUEST CHANGES ca045b71-7d43-42bd-99d2-7f53bb0f9e90 reopened acceptance criteria #2 and #6. Criteria #2 and #6 are unchecked for this review-fix pass and the prior final summary was cleared until the duplicate-marker fixes and README/evidence correction are revalidated.
 
 Review-fix validation complete. AC #2 is now covered by TestInboxMarkedDuplicateLoserOnlyStripsInboxLabel (duplicate marker loser only loses the inbox label and the marker-index winner remains canonical) and TestInboxCreatedTaskIDCollisionLeavesIssueUnmarkedAndContinues (newly-created ID collision leaves the inbox issue unmarked, records one per-task failure, and continues to the next inbox issue). AC #5 also gained ExecBacklog.ListTasks coverage through scriptRunner for the captured task-list fixture. AC #6 is satisfied by rewriting README dry-run wording to avoid an unproven FETCH_HEAD/ref guarantee and to document that Backlog CLI read operations may touch remotes when remote_operations is enabled. Validation output: targeted go test ./... -run "TestInbox(MarkedDuplicateLoserOnlyStripsInboxLabel|CreatedTaskIDCollisionLeavesIssueUnmarkedAndContinues)|TestBacklogJSONFixtureFieldNames" -count=1 => ok github.com/djensenius/backlog-sync 0.133s; go test ./... => ok github.com/djensenius/backlog-sync 1.040s; go vet ./... => no output.
+
+PR #6 Copilot review fix: dry-run Backlog subprocesses now inherit protected Git config (`remote.origin.url=/dev/null/backlog-sync-dry-run-no-remote`) so Backlog read commands cannot update `FETCH_HEAD` or refs via origin remote operations; README dry-run text again states the no-write contract. Validation: `go test ./... -run 'TestPaginationTotalLockAndEnvScrub|TestBacklogJSONFixtureFieldNames'` passed (ok github.com/djensenius/backlog-sync 0.216s); `go test ./...` passed (ok github.com/djensenius/backlog-sync 0.738s); `go vet ./...` passed with no output.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
