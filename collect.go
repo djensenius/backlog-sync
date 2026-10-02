@@ -39,7 +39,7 @@ type GitHub interface {
 	ClearProjectField(ctx context.Context, projectID, itemID, fieldID string) error
 	IssueParent(ctx context.Context, issueNodeID string) (IssueParentInfo, error)
 	AddSubIssue(ctx context.Context, parentRepo string, parentNumber int, childDatabaseID int64) error
-	RemoveSubIssue(ctx context.Context, parentNodeID string, childNodeID string) error
+	RemoveSubIssue(ctx context.Context, parentRepo string, parentNodeID string, childNodeID string) error
 }
 
 func CollectTasks(ctx context.Context, cfg Config, git Git, backlog Backlog, logf func(string, ...any)) (ResolvedTasks, error) {
@@ -163,7 +163,8 @@ func shouldSkipWorktree(wt Worktree) bool {
 
 func DiscoverBacklogDir(root string) (string, bool, error) {
 	// Match the Backlog.md CLI layouts resolved from the worktree root: root
-	// backlog.config.yml backlog_directory, then backlog/, then .backlog/.
+	// backlog.config.yml with Backlog.md's project_name/projectName marker and a
+	// backlog_directory/backlogDirectory value, then backlog/, then .backlog/.
 	// Do not recursively search nested config files; the syncer invokes the CLI
 	// from wt.Path, and the CLI would not resolve those nested folders either.
 	resolvedRoot, err := evalSymlinksAbs(root)
@@ -196,7 +197,14 @@ func discoverBacklogDirFromRootConfig(root, resolvedRoot string) (string, bool, 
 	if err != nil {
 		return "", false, fmt.Errorf("read %s: %w", configPath, err)
 	}
-	rel, ok, err := parseRootConfigValue(data, "backlog_directory")
+	hasProjectName, err := rootConfigHasProjectName(data)
+	if err != nil {
+		return "", false, fmt.Errorf("parse %s: %w", configPath, err)
+	}
+	if !hasProjectName {
+		return "", false, nil
+	}
+	rel, key, ok, err := parseRootConfigValueAny(data, "backlog_directory", "backlogDirectory")
 	if err != nil {
 		return "", false, fmt.Errorf("parse %s: %w", configPath, err)
 	}
@@ -204,24 +212,24 @@ func discoverBacklogDirFromRootConfig(root, resolvedRoot string) (string, bool, 
 		return "", false, nil
 	}
 	if filepath.IsAbs(rel) {
-		return "", false, fmt.Errorf("%s backlog_directory must be project-relative: %q", configPath, rel)
+		return "", false, fmt.Errorf("%s %s must be project-relative: %q", configPath, key, rel)
 	}
 	clean := filepath.Clean(rel)
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
-		return "", false, fmt.Errorf("%s backlog_directory must stay inside the worktree: %q", configPath, rel)
+		return "", false, fmt.Errorf("%s %s must stay inside the worktree: %q", configPath, key, rel)
 	}
 	path := filepath.Join(root, clean)
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) {
-		return "", false, fmt.Errorf("%s backlog_directory target %q does not exist", configPath, rel)
+		return "", false, fmt.Errorf("%s %s target %q does not exist", configPath, key, rel)
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("stat %s backlog_directory target %q: %w", configPath, rel, err)
+		return "", false, fmt.Errorf("stat %s %s target %q: %w", configPath, key, rel, err)
 	}
 	if !info.IsDir() {
-		return "", false, fmt.Errorf("%s backlog_directory target %q is not a directory", configPath, rel)
+		return "", false, fmt.Errorf("%s %s target %q is not a directory", configPath, key, rel)
 	}
-	if err := requireInsideResolvedWorktree(resolvedRoot, path, fmt.Sprintf("%s backlog_directory target %q", configPath, rel)); err != nil {
+	if err := requireInsideResolvedWorktree(resolvedRoot, path, fmt.Sprintf("%s %s target %q", configPath, key, rel)); err != nil {
 		return "", false, err
 	}
 	return path, true, nil
@@ -254,27 +262,42 @@ func pathWithin(root, candidate string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel))
 }
 
+func rootConfigHasProjectName(data []byte) (bool, error) {
+	_, _, ok, err := parseRootConfigValueAny(data, "project_name", "projectName")
+	return ok, err
+}
+
 func parseRootConfigValue(data []byte, name string) (string, bool, error) {
+	value, _, ok, err := parseRootConfigValueAny(data, name)
+	return value, ok, err
+}
+
+func parseRootConfigValueAny(data []byte, names ...string) (string, string, bool, error) {
+	wanted := make(map[string]bool, len(names))
+	for _, name := range names {
+		wanted[name] = true
+	}
 	for i, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		key, rawValue, ok := strings.Cut(line, ":")
-		if !ok || strings.TrimSpace(key) != name {
+		key = strings.TrimSpace(key)
+		if !ok || !wanted[key] {
 			continue
 		}
 		value := stripYAMLComment(strings.TrimSpace(rawValue))
 		value, err := unquoteYAMLScalar(strings.TrimSpace(value))
 		if err != nil {
-			return "", false, fmt.Errorf("line %d: %w", i+1, err)
+			return "", "", false, fmt.Errorf("line %d: %w", i+1, err)
 		}
 		if value == "" {
-			return "", false, fmt.Errorf("line %d: %s is empty", i+1, name)
+			return "", "", false, fmt.Errorf("line %d: %s is empty", i+1, key)
 		}
-		return value, true, nil
+		return value, key, true, nil
 	}
-	return "", false, nil
+	return "", "", false, nil
 }
 
 func stripYAMLComment(value string) string {
