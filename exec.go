@@ -20,7 +20,10 @@ type CommandRunner interface {
 	Run(ctx context.Context, dir string, name string, args []string, stdin []byte) ([]byte, error)
 }
 
-type OSCommandRunner struct{ Timeout time.Duration }
+type OSCommandRunner struct {
+	Timeout                 time.Duration
+	ProtectBacklogGitWrites bool
+}
 
 func (r OSCommandRunner) Run(ctx context.Context, dir string, name string, args []string, stdin []byte) ([]byte, error) {
 	if r.Timeout > 0 {
@@ -31,6 +34,9 @@ func (r OSCommandRunner) Run(ctx context.Context, dir string, name string, args 
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Env = scrubBacklogEnv(os.Environ())
+	if r.ProtectBacklogGitWrites && name == "backlog" {
+		cmd.Env = protectBacklogGitWritesEnv(cmd.Env)
+	}
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
@@ -57,6 +63,22 @@ func scrubBacklogEnv(in []string) []string {
 		out = append(out, env)
 	}
 	return out
+}
+
+func protectBacklogGitWritesEnv(in []string) []string {
+	out := make([]string, 0, len(in)+3)
+	for _, env := range in {
+		key, _, _ := strings.Cut(env, "=")
+		if key == "GIT_CONFIG_COUNT" || strings.HasPrefix(key, "GIT_CONFIG_KEY_") || strings.HasPrefix(key, "GIT_CONFIG_VALUE_") {
+			continue
+		}
+		out = append(out, env)
+	}
+	return append(out,
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=remote.origin.url",
+		"GIT_CONFIG_VALUE_0=/dev/null/backlog-sync-dry-run-no-remote",
+	)
 }
 
 type ExecBacklog struct{ Runner CommandRunner }

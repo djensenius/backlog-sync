@@ -1004,6 +1004,17 @@ func TestPaginationTotalLockAndEnvScrub(t *testing.T) {
 			t.Fatalf("BACKLOG env not scrubbed: %v", env)
 		}
 	}
+	protected := protectBacklogGitWritesEnv([]string{"PATH=/bin", "GIT_CONFIG_COUNT=9", "GIT_CONFIG_KEY_0=old", "GIT_CONFIG_VALUE_0=old"})
+	for _, want := range []string{"PATH=/bin", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=remote.origin.url", "GIT_CONFIG_VALUE_0=/dev/null/backlog-sync-dry-run-no-remote"} {
+		if !contains(protected, want) {
+			t.Fatalf("protected env missing %q: %v", want, protected)
+		}
+	}
+	for _, env := range protected {
+		if strings.Contains(env, "old") || strings.HasPrefix(env, "GIT_CONFIG_KEY_1=") || strings.HasPrefix(env, "GIT_CONFIG_VALUE_1=") {
+			t.Fatalf("stale git config env not removed: %v", protected)
+		}
+	}
 	root := tempRoot(t)
 	bl := newFakeBacklog(root, sampleTask())
 	bl.badTotal = true
