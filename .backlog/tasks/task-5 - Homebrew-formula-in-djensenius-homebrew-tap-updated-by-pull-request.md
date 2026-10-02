@@ -1,11 +1,11 @@
 ---
 id: TASK-5
 title: 'Homebrew formula in djensenius/homebrew-tap, updated by pull request'
-status: In Progress
+status: Done
 assignee:
   - '@david'
 created_date: '2026-10-01 15:18'
-updated_date: '2026-10-01 18:34'
+updated_date: '2026-10-02 02:17'
 labels:
   - release
 milestone: m-0
@@ -22,10 +22,10 @@ The owner installs Backlog.md with Homebrew and wants backlog-sync distributed t
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The release pipeline opens a PR on djensenius/homebrew-tap that adds or updates Formula/backlog-sync.rb (version, URLs and sha256 for macOS arm64 and Linux) for each stable release
-- [ ] #2 The formula installs the binary, runs `backlog-sync --version` in its test block, and the tap README lists it
-- [ ] #3 The token the pipeline needs is a fine-grained token created by the owner and stored as a repository secret (documented; never committed)
-- [ ] #4 `brew install djensenius/tap/backlog-sync` works for the first release
+- [x] #1 The release pipeline opens a PR on djensenius/homebrew-tap that adds or updates Formula/backlog-sync.rb (version, URLs and sha256 for macOS arm64 and Linux) for each stable release
+- [x] #2 The formula installs the binary, runs `backlog-sync --version` in its test block, and the tap README lists it
+- [x] #3 The token the pipeline needs is a fine-grained token created by the owner and stored as a repository secret (documented; never committed)
+- [x] #4 `brew install djensenius/tap/backlog-sync` works for the first release
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -56,4 +56,12 @@ Coordinator validation after blocker fix:
 - `mise run release:snapshot` passed, built snapshot version `0.0.0-snapshot-657f550`, archived all four target tarballs, and reported `release succeeded after 4s`.
 - Generator rehearsal using `dist/checksums.txt` and version `v0.0.0-snapshot-657f550` succeeded; generated formula passed `ruby -c` (`Syntax OK`) and `brew style` (`1 file inspected, no offenses detected`).
 Remaining blockers: actual tap PR creation requires the owner-created `HOMEBREW_TAP_FINE_GRAINED_TOKEN`; `brew install djensenius/tap/backlog-sync` requires a published stable release and merged tap PR.
+
+Release and Homebrew acceptance completed. Evidence: repository secret HOMEBREW_TAP_FINE_GRAINED_TOKEN exists in djensenius/backlog-sync as an Actions repository secret (verified by `gh secret list`, value not printed); release readiness checks passed before tagging (`go test ./...`, `go vet ./...`, `mise run ci`, `mise run release:check`); tag `v0.1.0` was pushed from main commit `0eca8d7caf8d727f2bbc54c54c14bd9607388f6d`; Release workflow run `36954697787` created the draft release successfully; published release https://github.com/djensenius/backlog-sync/releases/tag/v0.1.0 triggered Homebrew tap PR workflow run `36954796336`, which succeeded and opened https://github.com/djensenius/homebrew-tap/pull/1; tap PR #1 updated `Formula/backlog-sync.rb` and README, passed local `ruby -c` and `brew style`, and was merged. Final install evidence: `brew install djensenius/tap/backlog-sync` installed 0.1.0; `/opt/homebrew/bin/backlog-sync --version` printed `backlog-sync version=0.1.0 commit=0eca8d7caf8d727f2bbc54c54c14bd9607388f6d date=2026-10-02T02:03:15Z`; `brew test djensenius/tap/backlog-sync` ran `/opt/homebrew/Cellar/backlog-sync/0.1.0/bin/backlog-sync --version` successfully.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Published the first stable `backlog-sync` release (`v0.1.0`), verified the owner-provided `HOMEBREW_TAP_FINE_GRAINED_TOKEN` repository secret without exposing its value, and confirmed the release workflow opened the generated Homebrew tap PR. Merged djensenius/homebrew-tap PR #1, which added `Formula/backlog-sync.rb` with macOS/Linux amd64/arm64 release URLs and sha256 values plus the README listing. Verified installation with `brew install djensenius/tap/backlog-sync`, `/opt/homebrew/bin/backlog-sync --version`, and `brew test djensenius/tap/backlog-sync`.
+<!-- SECTION:FINAL_SUMMARY:END -->
