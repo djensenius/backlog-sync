@@ -3,9 +3,11 @@ id: TASK-1
 title: >-
   Repository protections: main ruleset with required PRs, CI and automatic
   Copilot review
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@david'
 created_date: '2026-10-01 15:18'
+updated_date: '2026-10-02 02:33'
 labels:
   - ci
   - repo
@@ -27,3 +29,12 @@ The project follows a pull-request-only workflow (see AGENTS.md): nothing may re
 - [ ] #3 The CI status check from the CI task is required once it exists
 - [ ] #4 The owner can still merge; settings are recorded in the task notes
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Verify the effective GitHub rulesets for the default branch.
+2. Record the active protection settings in TASK-1 notes.
+3. Check acceptance criteria only after verifying PR, deletion/force-push, Copilot review, required CI checks, and owner merge behavior.
+4. Mark TASK-1 Done via a metadata-only PR.
+<!-- SECTION:PLAN:END -->
