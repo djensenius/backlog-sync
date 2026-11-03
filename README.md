@@ -293,6 +293,8 @@ When the same task ID appears in more than one worktree, the winning copy is det
 
 Task IDs use the Backlog task prefix read from `backlog config get taskPrefix` / `task_prefix`, with read-only fallback parsing of Backlog config files when needed. IDs are normalized to lowercase for markers and title prefixes, including dotted IDs such as `task-1.2.7`.
 
+Before any writes, every listed and viewed task ID must agree and round-trip through the configured prefix's marker parser. A mismatched prefix, malformed ID, or missing task identity aborts the run instead of creating unrecognizable mirrors. Null or identity-less GitHub issue inventory responses also abort rather than being treated as an empty repository.
+
 ## Mirror behavior
 
 - One GitHub issue is mirrored per Backlog task, matched by first-line marker `<!-- backlog:task-N -->` using the configured task prefix.
@@ -303,6 +305,7 @@ Task IDs use the Backlog task prefix read from `backlog config get taskPrefix` /
 - `Done` tasks are closed with `state_reason: completed`; other statuses are opened or reopened.
 - Issue bodies are rendered after issue creation/adoption so a second real run should be a no-op.
 - Bodies are deterministic and include the marker, mirror notice, status, branch when not main, project, milestone title, priority, labels, assignees, parent/dependencies/subtasks with issue links when known, description, acceptance criteria, implementation plan, implementation notes, and final summary.
+- Milestone titles include completed milestones via `backlog milestone list --plain --show-completed`. Unresolved milestone IDs remain explicit; titles are never guessed.
 
 When `adoptReferencedIssues` is true and a task has no marked issue, a `https://github.com/<owner>/<repo>/issues/<N>` reference whose repo matches the task target repo can be adopted. Pull requests are ignored. If several references qualify, the lowest unclaimed issue number wins. An issue with a different marker, or an issue already claimed by another task through a marker, inbox link, or earlier adoption in the run, is never adopted.
 

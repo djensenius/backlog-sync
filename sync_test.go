@@ -378,7 +378,7 @@ func TestAppProjectWriteFailureIsolatedToOneTask(t *testing.T) {
 	bl := newFakeBacklog(root, first, second)
 	gh := basicGH(map[string][]Issue{"owner/repo": {existing}})
 	gh.items = nil
-	gh.addProjectItemErr = errors.New("project add failed")
+	gh.addProjectItemErrs = map[string]error{existing.NodeID: errors.New("project add failed")}
 	var logs []string
 	app := App{Git: fakeGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}}, rootClean: true}, Backlog: bl, GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
 	c, err := app.Run(ctx, cfg)
@@ -390,6 +390,9 @@ func TestAppProjectWriteFailureIsolatedToOneTask(t *testing.T) {
 	}
 	if findIssueByTitlePrefix(gh.issues["owner/repo"], "task-61:").Number == 0 {
 		t.Fatalf("second task was not created after project write failure, issues=%+v", gh.issues["owner/repo"])
+	}
+	if c.ProjectAdded != 1 || gh.addProjectItemCalls != 2 || len(gh.items) != 1 || gh.items[0].ContentNodeID != gh.createdIssues[0].NodeID {
+		t.Fatalf("only the second task should be attached after the first add fails, counters=%+v items=%+v", c, gh.items)
 	}
 }
 
@@ -654,10 +657,10 @@ func TestInboxManualModeClaimsUnmarkedInboxBeforeAdoption(t *testing.T) {
 	if original.Title != inbox.Title || original.Body != inbox.Body || !hasLabelFold(original, "inbox") || len(gh.updatedIssues) != 0 {
 		t.Fatalf("unmarked inbox issue should receive zero issue writes, original=%+v updates=%d", original, len(gh.updatedIssues))
 	}
-	if gh.addProjectItemCalls != 0 {
-		t.Fatalf("unmarked inbox issue should not be added to the project, addProjectItemCalls=%d", gh.addProjectItemCalls)
-	}
 	created := gh.createdIssues[0]
+	if gh.addProjectItemCalls != 1 || len(gh.items) != 1 || gh.items[0].ContentNodeID != created.NodeID {
+		t.Fatalf("only the new mirror, not the unmarked inbox issue, should be added to the project, calls=%d items=%+v", gh.addProjectItemCalls, gh.items)
+	}
 	if created.Number == inbox.Number || created.Title != IssueTitle(task) || !strings.HasPrefix(created.Body, MarkerFor(task.ID)+"\n") {
 		t.Fatalf("task should get one new mirrored issue instead of adopting inbox issue, created=%+v", created)
 	}
@@ -1714,7 +1717,7 @@ type fakeGitHub struct {
 	subIssueErrs             []error
 	removeSubIssueErr        error
 	updateErr                error
-	addProjectItemErr        error
+	addProjectItemErrs       map[string]error
 	createErrTitleContains   string
 	failOnWrite              bool
 }
@@ -1746,7 +1749,6 @@ func (g *fakeGitHub) CreateIssue(_ context.Context, repo string, title string, b
 	issue := Issue{Number: 100 + len(g.createdIssues), DatabaseID: int64(100 + len(g.createdIssues)), NodeID: "I_NEW_" + title, HTMLURL: "https://github.com/" + repo + "/issues/100", Title: title, Body: body, State: "open", Repo: repo, Labels: labelsToIssueLabels(labels)}
 	g.createdIssues = append(g.createdIssues, issue)
 	g.issues[repo] = append(g.issues[repo], issue)
-	g.items = append(g.items, ProjectItem{ID: "PVTI_" + issue.NodeID, ContentNodeID: issue.NodeID, Status: "", FieldValues: map[string]ProjectFieldValue{}})
 	return issue, nil
 }
 func (g *fakeGitHub) UpdateIssue(_ context.Context, repo string, number int, patch IssuePatch) (Issue, error) {
@@ -1796,10 +1798,10 @@ func (g *fakeGitHub) AddProjectItem(_ context.Context, _ string, contentNodeID s
 		return ProjectItem{}, errors.New("unexpected write")
 	}
 	g.addProjectItemCalls++
-	if g.addProjectItemErr != nil {
-		return ProjectItem{}, g.addProjectItemErr
+	if err := g.addProjectItemErrs[contentNodeID]; err != nil {
+		return ProjectItem{}, err
 	}
-	item := ProjectItem{ID: "PVTI_NEW", ContentNodeID: contentNodeID, FieldValues: map[string]ProjectFieldValue{}}
+	item := ProjectItem{ID: "PVTI_" + contentNodeID, ContentNodeID: contentNodeID, FieldValues: map[string]ProjectFieldValue{}}
 	g.items = append(g.items, item)
 	return item, nil
 }
