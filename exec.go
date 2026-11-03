@@ -197,7 +197,7 @@ func readTaskPrefixFromBacklogDir(backlogDir string) (string, bool, error) {
 }
 
 func (b ExecBacklog) Milestones(ctx context.Context, dir string) (map[string]string, error) {
-	out, err := b.Runner.Run(ctx, dir, "backlog", []string{"milestone", "list", "--plain"}, nil)
+	out, err := b.Runner.Run(ctx, dir, "backlog", []string{"milestone", "list", "--plain", "--show-completed"}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -368,10 +368,21 @@ func (g ExecGitHub) ListIssues(ctx context.Context, repo string) ([]Issue, error
 	if err := json.Unmarshal(out, &pages); err != nil {
 		return nil, err
 	}
+	// An empty repository is one empty page ([[]]), not a missing/null snapshot.
+	// Treating an invalid inventory as empty would recreate every mirror.
+	if len(pages) == 0 {
+		return nil, fmt.Errorf("invalid issue inventory for %s: no pages returned", repo)
+	}
 	var issues []Issue
-	for _, page := range pages {
-		for _, issue := range page {
+	for pageIndex, page := range pages {
+		if page == nil {
+			return nil, fmt.Errorf("invalid issue inventory for %s: null page %d", repo, pageIndex+1)
+		}
+		for issueIndex, issue := range page {
 			if issue.PullRequest == nil {
+				if issue.Number <= 0 || issue.DatabaseID <= 0 || strings.TrimSpace(issue.NodeID) == "" {
+					return nil, fmt.Errorf("invalid issue inventory for %s: missing identity at page %d entry %d", repo, pageIndex+1, issueIndex+1)
+				}
 				issue.Repo = repo
 				issues = append(issues, issue)
 			}

@@ -81,11 +81,20 @@ func CollectTasks(ctx context.Context, cfg Config, git Git, backlog Backlog, log
 			mainTaskCount = len(summaries)
 		}
 		for _, summary := range summaries {
+			if err := validateTaskIdentity(summary.ID, cfg.TaskPrefix); err != nil {
+				return ResolvedTasks{}, fmt.Errorf("list tasks in %s: %w", wt.Path, err)
+			}
 			view, err := backlog.ViewTask(ctx, wt.Path, summary.ID)
 			if err != nil {
 				return ResolvedTasks{}, fmt.Errorf("view %s in %s: %w", summary.ID, wt.Path, err)
 			}
 			task := view.Task
+			if err := validateTaskIdentity(task.ID, cfg.TaskPrefix); err != nil {
+				return ResolvedTasks{}, fmt.Errorf("view %s in %s: %w", summary.ID, wt.Path, err)
+			}
+			if CanonicalTaskID(task.ID) != CanonicalTaskID(summary.ID) {
+				return ResolvedTasks{}, fmt.Errorf("task identity mismatch in %s: requested %q but view returned %q", wt.Path, summary.ID, task.ID)
+			}
 			task.ID = UpperTaskID(task.ID)
 			task.Branch = wt.Branch
 			task.WorktreePath = wt.Path
@@ -119,6 +128,17 @@ func CollectTasks(ctx context.Context, cfg Config, git Git, backlog Backlog, log
 		resolved.BranchByID[id] = winner.Worktree.Branch
 	}
 	return resolved, nil
+}
+
+func validateTaskIdentity(id, prefix string) error {
+	// Creation renders from the task ID, while discovery parses with the configured
+	// prefix. Require that round trip before any writes, or every run could create
+	// another issue whose marker the next run cannot recognize.
+	parsed, ok := ParseMarkerWithPrefix(MarkerFor(id), prefix)
+	if !ok || parsed != CanonicalTaskID(id) {
+		return fmt.Errorf("task identity %q cannot round-trip a mirror marker with task prefix %q", id, prefix)
+	}
+	return nil
 }
 
 func listAllTasks(ctx context.Context, backlog Backlog, dir string) ([]TaskSummary, error) {
