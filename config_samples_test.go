@@ -146,6 +146,68 @@ func TestCLIRetriesConfig(t *testing.T) {
 	}
 }
 
+func TestTimeoutSecondsConfig(t *testing.T) {
+	t.Setenv(envTimeoutSeconds, "")
+	t.Setenv(envCLIRetries, "")
+	for _, tc := range []struct {
+		name    string
+		extra   string
+		want    int
+		wantErr string
+	}{
+		{name: "omitted", want: 60},
+		{name: "zero means default", extra: `, "timeoutSeconds": 0`, want: 60},
+		{name: "positive", extra: `, "timeoutSeconds": 90`, want: 90},
+		{name: "negative", extra: `, "timeoutSeconds": -60`, wantErr: "timeoutSeconds must be a non-negative integer, got -60"},
+		{name: "minus one", extra: `, "timeoutSeconds": -1`, wantErr: "timeoutSeconds must be a non-negative integer, got -1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := parseFlags([]string{"--root", t.TempDir(), "--config", writeRetryTestConfig(t, tc.extra)})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("parseFlags err=%v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.TimeoutSeconds != tc.want {
+				t.Fatalf("TimeoutSeconds=%d, want %d", cfg.TimeoutSeconds, tc.want)
+			}
+		})
+	}
+}
+
+// The environment override replaces the file value before validation, so a
+// valid BACKLOG_SYNC_TIMEOUT_SECONDS wins over a negative file value, while an
+// empty override leaves the negative file value to be rejected.
+func TestEnvTimeoutOverrideWithNegativeFileValue(t *testing.T) {
+	path := writeRetryTestConfig(t, `, "timeoutSeconds": -60`)
+	args := []string{"--root", t.TempDir(), "--config", path}
+	t.Setenv(envCLIRetries, "")
+
+	t.Setenv(envTimeoutSeconds, "")
+	if _, err := parseFlags(args); err == nil || !strings.Contains(err.Error(), "timeoutSeconds must be a non-negative integer, got -60") {
+		t.Fatalf("empty env: err=%v, want negative file value rejected", err)
+	}
+
+	t.Setenv(envTimeoutSeconds, "45")
+	if cfg, err := parseFlags(args); err != nil || cfg.TimeoutSeconds != 45 {
+		t.Fatalf("env override: TimeoutSeconds=%d err=%v, want 45", cfg.TimeoutSeconds, err)
+	}
+
+	t.Setenv(envTimeoutSeconds, "0")
+	if cfg, err := parseFlags(args); err != nil || cfg.TimeoutSeconds != 60 {
+		t.Fatalf("env zero override: TimeoutSeconds=%d err=%v, want default 60", cfg.TimeoutSeconds, err)
+	}
+
+	t.Setenv(envTimeoutSeconds, "-5")
+	if _, err := parseFlags(args); err == nil || !strings.Contains(err.Error(), envTimeoutSeconds+" must be a non-negative integer") {
+		t.Fatalf("negative env: err=%v, want env rejection", err)
+	}
+}
+
 func TestEnvOverridesTimeoutAndCLIRetries(t *testing.T) {
 	path := writeRetryTestConfig(t, `, "timeoutSeconds": 30, "cliRetries": 3`)
 	args := []string{"--root", t.TempDir(), "--config", path}
