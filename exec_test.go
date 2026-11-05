@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -126,6 +128,29 @@ func TestExecBacklogReturnsTimeoutWhenRetriesExhausted(t *testing.T) {
 	}
 	if len(r.calls) != 3 || len(rec.sleeps) != 2 || len(rec.logs) != 2 {
 		t.Fatalf("attempts=%d sleeps=%v logs=%d, want 3 attempts, 2 sleeps, 2 logs", len(r.calls), rec.sleeps, len(rec.logs))
+	}
+}
+
+func TestExecBacklogTaskPrefixFallsBackAfterRetriesExhausted(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "backlog.config.yml"), []byte("project_name: Example\ntask_prefix: 'bug'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := &flakyRunner{timeouts: 100}
+	rec := &retryRecorder{}
+	prefix, err := rec.backlog(r, 2).TaskPrefix(context.Background(), root)
+	if err != nil || prefix != "bug" {
+		t.Fatalf("TaskPrefix=%q err=%v, want bug from the root config after both keys time out", prefix, err)
+	}
+	want := []string{
+		"backlog config get taskPrefix", "backlog config get taskPrefix", "backlog config get taskPrefix",
+		"backlog config get task_prefix", "backlog config get task_prefix", "backlog config get task_prefix",
+	}
+	if strings.Join(r.calls, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("calls=%q, want three attempts per key: %q", r.calls, want)
+	}
+	if fmt.Sprint(rec.sleeps) != "[2s 4s 2s 4s]" {
+		t.Fatalf("backoff sleeps=%v, want [2s 4s 2s 4s]", rec.sleeps)
 	}
 }
 
