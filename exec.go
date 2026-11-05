@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -29,6 +30,10 @@ type OSCommandRunner struct {
 // A cancelled or expired parent context is never reported with it.
 var errCommandTimeout = errors.New("timed out")
 
+// commandWaitDelay bounds how long Run waits for stdout and stderr to close
+// after the command exits or is killed, in case a descendant still holds them.
+const commandWaitDelay = 2 * time.Second
+
 func commandTimeoutError(name string, args []string, timeout time.Duration) error {
 	return fmt.Errorf("%s %s: %w after %s", name, strings.Join(args, " "), errCommandTimeout, timeout)
 }
@@ -42,6 +47,14 @@ func (r OSCommandRunner) Run(ctx context.Context, dir string, name string, args 
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
+	// Run the command in its own process group so a timeout or parent cancel
+	// also stops the processes it started (for example git under backlog).
+	// Cancel sends SIGTERM first so git can remove its index.lock; if the
+	// command has not exited after WaitDelay, Go kills it with SIGKILL and
+	// closes the pipes, and the post-Wait group kill below removes the rest.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return terminateProcessGroup(cmd.Process) }
+	cmd.WaitDelay = commandWaitDelay
 	cmd.Env = scrubBacklogEnv(os.Environ())
 	if r.ProtectBacklogGitWrites && name == "backlog" {
 		cmd.Env = protectBacklogGitWritesEnv(cmd.Env)
@@ -52,17 +65,51 @@ func (r OSCommandRunner) Run(ctx context.Context, dir string, name string, args 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err := cmd.Start()
+	if err == nil {
+		// The command leads its own process group, so its pid is the pgid.
+		// Capture it now, after Start, while the leader cannot be reaped.
+		pgid := cmd.Process.Pid
+		err = cmd.Wait()
+		// Always SIGKILL what is left of the group, whatever the outcome, so
+		// no descendant outlives Run (for example after a non-zero exit, a
+		// clean exit just before the deadline, or a descendant that ignored
+		// SIGTERM). The leader has been reaped by now. POSIX does not reuse a
+		// pid as a new pgid only while the group still has members; if the
+		// group has just emptied, a new process could in theory reuse the pid
+		// and lead a new group in the microseconds before this kill. That race
+		// is negligible. An empty group gives ESRCH, which is ignored.
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	}
 	if parentErr := parent.Err(); parentErr != nil {
 		return stdout.Bytes(), fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), parentErr)
 	}
 	if ctx.Err() == context.DeadlineExceeded {
 		return stdout.Bytes(), commandTimeoutError(name, args, r.Timeout)
 	}
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// The command itself exited successfully, but a descendant kept
+		// stdout or stderr open past commandWaitDelay. Treat the call as a
+		// success: the command's own output is complete, and the group kill
+		// above has already removed the descendant.
+		err = nil
+	}
 	if err != nil {
 		return stdout.Bytes(), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.Bytes(), nil
+}
+
+// terminateProcessGroup sends SIGTERM to the process group led by p, falling
+// back to signalling p alone if the group signal fails for a reason other
+// than ESRCH. It runs as cmd.Cancel on a timeout or parent cancel, normally
+// before Wait has reaped the leader, so p.Pid is still our group's pgid.
+func terminateProcessGroup(p *os.Process) error {
+	err := syscall.Kill(-p.Pid, syscall.SIGTERM)
+	if err == nil || errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	return p.Signal(syscall.SIGTERM)
 }
 
 func scrubBacklogEnv(in []string) []string {

@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -47,12 +48,26 @@ func main() {
 		logf("error: %v", err)
 		os.Exit(1)
 	}
-	defer unlock()
+	// Cancel running commands on Ctrl-C or a launchd SIGTERM: each command runs
+	// in its own process group, so the signal would not reach it otherwise.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	runner := OSCommandRunner{Timeout: time.Duration(cfg.TimeoutSeconds) * time.Second, ProtectBacklogGitWrites: cfg.DryRun}
 	gh := ExecGitHub{Runner: runner, AllowedRepos: cfg.ConfiguredRepos()}
 	backlog := ExecBacklog{Runner: runner, Retries: cfg.CLIRetryCount(), Logf: logf}
 	app := App{Git: ExecGit{Runner: runner}, Backlog: backlog, GitHub: gh, Logf: logf}
-	if _, err := app.Run(context.Background(), cfg); err != nil {
+	_, err = app.Run(ctx, cfg)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// A signal cancelled the run. Say so plainly, since the last error
+		// may come from a fallback that ran after the cancel.
+		logf("interrupted: %v", ctxErr)
+		if err == nil {
+			// The signal arrived during a step whose errors are only logged.
+			err = ctxErr
+		}
+	}
+	stop()
+	unlock()
+	if err != nil {
 		logf("error: %v", err)
 		os.Exit(1)
 	}
