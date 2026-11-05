@@ -38,6 +38,7 @@ type GitHub interface {
 	UpdateProjectText(ctx context.Context, projectID, itemID, fieldID, text string) error
 	ClearProjectField(ctx context.Context, projectID, itemID, fieldID string) error
 	IssueParent(ctx context.Context, issueNodeID string) (IssueParentInfo, error)
+	SubIssueCount(ctx context.Context, issueNodeID string) (int, error)
 	AddSubIssue(ctx context.Context, parentRepo string, parentNumber int, childDatabaseID int64) error
 	RemoveSubIssue(ctx context.Context, parentRepo string, parentNodeID string, childNodeID string) error
 }

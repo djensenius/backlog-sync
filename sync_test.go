@@ -1716,6 +1716,10 @@ type fakeGitHub struct {
 	subIssueErr              error
 	subIssueErrs             []error
 	removeSubIssueErr        error
+	subIssueCounts           map[string]int
+	subIssueCountErr         error
+	subIssueCountCalls       int
+	addSubIssueTargets       []string
 	updateErr                error
 	addProjectItemErrs       map[string]error
 	createErrTitleContains   string
@@ -1846,11 +1850,19 @@ func (g *fakeGitHub) ClearProjectField(context.Context, string, string, string) 
 func (g *fakeGitHub) IssueParent(_ context.Context, issueNodeID string) (IssueParentInfo, error) {
 	return g.parents[issueNodeID], nil
 }
+func (g *fakeGitHub) SubIssueCount(_ context.Context, issueNodeID string) (int, error) {
+	g.subIssueCountCalls++
+	if g.subIssueCountErr != nil {
+		return 0, g.subIssueCountErr
+	}
+	return g.subIssueCounts[issueNodeID], nil
+}
 func (g *fakeGitHub) AddSubIssue(_ context.Context, parentRepo string, parentNumber int, childDatabaseID int64) error {
 	if g.failOnWrite {
 		return errors.New("unexpected write")
 	}
 	g.addSubIssueCalls++
+	g.addSubIssueTargets = append(g.addSubIssueTargets, fmt.Sprintf("%s#%d", parentRepo, parentNumber))
 	if len(g.subIssueErrs) > 0 {
 		err := g.subIssueErrs[0]
 		g.subIssueErrs = g.subIssueErrs[1:]

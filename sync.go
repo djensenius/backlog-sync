@@ -843,8 +843,14 @@ func (a *App) logDryRunFieldSets(cfg Config, project ProjectInfo, task Task, mil
 	return count
 }
 
+// githubSubIssueLimit is GitHub's cap on sub-issues (open and closed) under one parent issue.
+const githubSubIssueLimit = 100
+
 func (a *App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTasks, issueByTaskID map[string]Issue, claimedIssues map[string]string) (linked int, failed int) {
 	warned := map[string]bool{}
+	// subIssueCounts caches each parent's known sub-issue count for this run so a full
+	// parent is read once and later children skip the API calls.
+	subIssueCounts := map[string]int{}
 	for _, task := range resolved.Tasks {
 		id := CanonicalTaskID(task.ID)
 		if task.ParentTaskID == nil || strings.TrimSpace(*task.ParentTaskID) == "" {
@@ -876,6 +882,22 @@ func (a *App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTa
 				a.warnOnce(warned, "foreign-parent-"+current.Repo, "warning: refusing to remove foreign sub-issue parent %s#%d for %s#%d; skipping link", current.Repo, current.Number, child.Repo, child.Number)
 				continue
 			}
+		}
+		count, known := subIssueCounts[parent.NodeID]
+		if !known {
+			count, err = a.GitHub.SubIssueCount(ctx, parent.NodeID)
+			if err != nil {
+				failed++
+				a.Logf("error: %s read sub-issue count of parent %s#%d failed: %v", id, parent.Repo, parent.Number, err)
+				continue
+			}
+			subIssueCounts[parent.NodeID] = count
+		}
+		if count >= githubSubIssueLimit {
+			a.warnSubIssueLimit(cfg, warned, parent)
+			continue
+		}
+		if current.ID != "" {
 			a.LogAction(cfg.DryRun, "remove existing sub-issue parent %s#%d for %s#%d", current.Repo, current.Number, child.Repo, child.Number)
 		}
 		a.LogAction(cfg.DryRun, "link %s#%d under parent %s#%d", child.Repo, child.Number, parent.Repo, parent.Number)
@@ -888,6 +910,18 @@ func (a *App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTa
 				}
 			}
 			if err := a.GitHub.AddSubIssue(ctx, parent.Repo, parent.Number, child.DatabaseID); err != nil {
+				if isSubIssueLimitRejection(err) {
+					subIssueCounts[parent.NodeID] = githubSubIssueLimit
+					a.warnSubIssueLimit(cfg, warned, parent)
+					if current.ID != "" {
+						a.Logf("restore previous sub-issue parent %s#%d for %s#%d", current.Repo, current.Number, child.Repo, child.Number)
+						if err := a.GitHub.AddSubIssue(ctx, current.Repo, current.Number, child.DatabaseID); err != nil {
+							failed++
+							a.Logf("error: %s restore sub-issue parent %s#%d failed: %v", id, current.Repo, current.Number, err)
+						}
+					}
+					continue
+				}
 				if isExpectedSubIssueLinkRejection(err) {
 					a.warnOnce(warned, "add-sub-issue-unsupported", "warning: sub-issue links are not supported for %s#%d under %s#%d; skipping link: %v", child.Repo, child.Number, parent.Repo, parent.Number, err)
 					continue
@@ -897,9 +931,31 @@ func (a *App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTa
 				continue
 			}
 		}
+		subIssueCounts[parent.NodeID]++
+		if n, ok := subIssueCounts[current.ID]; ok && current.ID != "" && n > 0 {
+			subIssueCounts[current.ID] = n - 1
+		}
 		linked++
 	}
 	return linked, failed
+}
+
+func (a *App) warnSubIssueLimit(cfg Config, warned map[string]bool, parent Issue) {
+	skip := "skipping"
+	if cfg.DryRun {
+		skip = "would skip"
+	}
+	a.warnOnce(warned, "sub-issue-limit-"+parent.NodeID, "warning: parent %s#%d has reached GitHub's sub-issue limit; %s sub-issue links under it (children keep the Parent link in their body)", parent.Repo, parent.Number, skip)
+}
+
+// isSubIssueLimitRejection matches GitHub's HTTP 422 "Parent cannot have more than
+// 100 sub-issues" response and nothing broader.
+func isSubIssueLimitRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "cannot have more than") && (strings.Contains(msg, "sub-issues") || strings.Contains(msg, "sub issues"))
 }
 
 func isExpectedSubIssueLinkRejection(err error) bool {

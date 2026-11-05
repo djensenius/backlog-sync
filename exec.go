@@ -651,6 +651,30 @@ func (g ExecGitHub) IssueParent(ctx context.Context, issueNodeID string) (IssueP
 	}
 	return IssueParentInfo{ID: resp.Data.Node.Parent.ID, Number: resp.Data.Node.Parent.Number, Repo: resp.Data.Node.Parent.Repository.NameWithOwner}, nil
 }
+func (g ExecGitHub) SubIssueCount(ctx context.Context, issueNodeID string) (int, error) {
+	query := `query($id:ID!) { node(id:$id) { ... on Issue { subIssuesSummary { total } } } }`
+	payload := map[string]any{"query": query, "variables": map[string]any{"id": issueNodeID}}
+	out, err := g.ghJSON(ctx, []string{"api", "graphql", "--input", "-"}, payload)
+	if err != nil {
+		return 0, err
+	}
+	var resp struct {
+		Data struct {
+			Node *struct {
+				SubIssuesSummary *struct {
+					Total int `json:"total"`
+				} `json:"subIssuesSummary"`
+			} `json:"node"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		return 0, err
+	}
+	if resp.Data.Node == nil || resp.Data.Node.SubIssuesSummary == nil {
+		return 0, fmt.Errorf("no sub-issue summary for issue %s", issueNodeID)
+	}
+	return resp.Data.Node.SubIssuesSummary.Total, nil
+}
 func (g ExecGitHub) AddSubIssue(ctx context.Context, parentRepo string, parentNumber int, childDatabaseID int64) error {
 	if err := g.checkRepo(parentRepo); err != nil {
 		return err
