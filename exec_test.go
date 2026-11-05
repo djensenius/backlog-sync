@@ -309,7 +309,7 @@ func assertProcessGone(t *testing.T, pid int) {
 }
 
 func TestOSCommandRunnerTimeoutKillsProcessGroup(t *testing.T) {
-	const timeout = 200 * time.Millisecond
+	const timeout = 500 * time.Millisecond
 	start := time.Now()
 	out, err := OSCommandRunner{Timeout: timeout}.Run(context.Background(), "", "sh", grandchildScript, nil)
 	elapsed := time.Since(start)
@@ -326,7 +326,8 @@ func TestOSCommandRunnerTimeoutKillsProcessGroup(t *testing.T) {
 func TestOSCommandRunnerParentCancelKillsProcessGroup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	stop := time.AfterFunc(200*time.Millisecond, cancel)
+	const cancelAfter = 500 * time.Millisecond
+	stop := time.AfterFunc(cancelAfter, cancel)
 	defer stop.Stop()
 	start := time.Now()
 	out, err := OSCommandRunner{Timeout: time.Hour}.Run(ctx, "", "sh", grandchildScript, nil)
@@ -335,7 +336,7 @@ func TestOSCommandRunnerParentCancelKillsProcessGroup(t *testing.T) {
 	if !errors.Is(err, context.Canceled) || errors.Is(err, errCommandTimeout) {
 		t.Fatalf("err=%v, want context.Canceled", err)
 	}
-	if limit := 200*time.Millisecond + commandWaitDelay + time.Second; elapsed > limit {
+	if limit := cancelAfter + commandWaitDelay + time.Second; elapsed > limit {
 		t.Fatalf("Run took %s, want at most %s", elapsed, limit)
 	}
 	assertProcessGone(t, pid)
@@ -353,4 +354,26 @@ func TestOSCommandRunnerSucceedsWhenGrandchildHoldsOutput(t *testing.T) {
 		t.Fatalf("Run took %s, want at most %s", elapsed, limit)
 	}
 	assertProcessGone(t, pid)
+}
+
+func TestOSCommandRunnerNonZeroExitKillsGrandchild(t *testing.T) {
+	start := time.Now()
+	out, err := OSCommandRunner{Timeout: time.Minute}.Run(context.Background(), "", "sh", []string{"-c", "sleep 30 & echo $!; exit 3"}, nil)
+	elapsed := time.Since(start)
+	pid := grandchildPID(t, out)
+	if err == nil || errors.Is(err, errCommandTimeout) {
+		t.Fatalf("err=%v, want the non-zero exit error", err)
+	}
+	if limit := commandWaitDelay + time.Second; elapsed > limit {
+		t.Fatalf("Run took %s, want at most %s", elapsed, limit)
+	}
+	assertProcessGone(t, pid)
+}
+
+func TestOSCommandRunnerExitBeforeTimeoutKillsGrandchild(t *testing.T) {
+	// The command exits cleanly before the timeout, but WaitDelay for the
+	// grandchild's open pipe runs past it. Which error comes back depends on
+	// timing; only the leak is checked.
+	out, _ := OSCommandRunner{Timeout: time.Second}.Run(context.Background(), "", "sh", []string{"-c", "sleep 30 & echo $!; sleep 0.3"}, nil)
+	assertProcessGone(t, grandchildPID(t, out))
 }

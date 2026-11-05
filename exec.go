@@ -62,7 +62,21 @@ func (r OSCommandRunner) Run(ctx context.Context, dir string, name string, args 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err := cmd.Start()
+	if err == nil {
+		// The command leads its own process group, so its pid is the pgid.
+		// Capture it now, after Start, while the leader cannot be reaped.
+		pgid := cmd.Process.Pid
+		err = cmd.Wait()
+		// Always kill what is left of the group, whatever the outcome, so no
+		// descendant outlives Run (for example after a non-zero exit, or a
+		// clean exit just before the deadline, while a grandchild still holds
+		// stdout or stderr). The leader has been reaped by now, but POSIX does
+		// not reuse a pid as a new pgid while its group still has members, so
+		// this cannot hit an unrelated group. An empty group gives ESRCH,
+		// which is ignored.
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	}
 	if parentErr := parent.Err(); parentErr != nil {
 		return stdout.Bytes(), fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), parentErr)
 	}
@@ -72,9 +86,8 @@ func (r OSCommandRunner) Run(ctx context.Context, dir string, name string, args 
 	if errors.Is(err, exec.ErrWaitDelay) {
 		// The command itself exited successfully, but a descendant kept
 		// stdout or stderr open past commandWaitDelay. Treat the call as a
-		// success (the command's own output is complete) and kill whatever is
-		// left in its process group so it does not outlive the run.
-		_ = killProcessGroup(cmd.Process)
+		// success: the command's own output is complete, and the group kill
+		// above has already removed the descendant.
 		err = nil
 	}
 	if err != nil {
@@ -84,7 +97,9 @@ func (r OSCommandRunner) Run(ctx context.Context, dir string, name string, args 
 }
 
 // killProcessGroup sends SIGKILL to the process group led by p, falling back
-// to killing p alone if the group cannot be signalled.
+// to killing p alone if the group cannot be signalled. It runs as cmd.Cancel
+// on a timeout or parent cancel, normally before Wait has reaped the leader,
+// so p.Pid is still our group's pgid.
 func killProcessGroup(p *os.Process) error {
 	if err := syscall.Kill(-p.Pid, syscall.SIGKILL); err != nil {
 		return p.Kill()
