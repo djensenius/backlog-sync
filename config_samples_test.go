@@ -169,6 +169,13 @@ func TestEnvOverridesTimeoutAndCLIRetries(t *testing.T) {
 		t.Fatalf("env maximum: CLIRetryCount=%d err=%v, want 10", cfg.CLIRetryCount(), err)
 	}
 
+	// As with "timeoutSeconds": 0 in the file, a zero override means the
+	// default 60s, even though the file sets 30.
+	t.Setenv(envTimeoutSeconds, "0")
+	if cfg, err = parseFlags(args); err != nil || cfg.TimeoutSeconds != 60 {
+		t.Fatalf("env zero timeout: TimeoutSeconds=%d err=%v, want default 60", cfg.TimeoutSeconds, err)
+	}
+
 	for _, tc := range []struct{ name, value, want string }{
 		{envTimeoutSeconds, "abc", "must be a non-negative integer"},
 		{envTimeoutSeconds, "-5", "must be a non-negative integer"},
