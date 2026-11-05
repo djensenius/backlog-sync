@@ -868,7 +868,7 @@ func (a *App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTa
 		}
 	}
 	// restoreOldParent puts child back under the parent it was removed from in this
-	// attempt after the new link was rejected. It tries once and reports false only
+	// attempt after the new link failed. It tries once and reports false only
 	// when the restore itself failed; with no previous parent there is nothing to do.
 	// Only live runs call it: a dry run never sends the add, so it is never rejected.
 	restoreOldParent := func(id string, current IssueParentInfo, child Issue) bool {
@@ -878,6 +878,11 @@ func (a *App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTa
 		a.Logf("restore previous sub-issue parent %s#%d for %s#%d", current.Repo, current.Number, child.Repo, child.Number)
 		if err := a.GitHub.AddSubIssue(ctx, current.Repo, current.Number, child.DatabaseID); err != nil {
 			a.Logf("error: %s restore sub-issue parent %s#%d failed: %v", id, current.Repo, current.Number, err)
+			if isSubIssueLimitRejection(err) {
+				// The old parent filled up meanwhile; later children skip it.
+				subIssueCounts[current.ID] = githubSubIssueLimit
+				a.warnSubIssueLimit(cfg, warned, Issue{NodeID: current.ID, Number: current.Number, Repo: current.Repo})
+			}
 			return false
 		}
 		adjustOldParentCount(current.ID, 1)
@@ -963,8 +968,11 @@ func (a *App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTa
 					}
 					continue
 				}
+				// The add failure is this child's one failure; a failed restore is
+				// logged but not counted again.
 				failed++
 				a.Logf("error: %s add sub-issue under %s#%d failed: %v", id, parent.Repo, parent.Number, err)
+				restoreOldParent(id, current, child)
 				continue
 			}
 		}
