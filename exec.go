@@ -99,7 +99,7 @@ type ExecBacklog struct {
 	// gets. Zero disables retries.
 	Retries int
 	// RetryBase is the first backoff delay (default defaultCLIRetryBase); it
-	// doubles after each retry up to maxCLIRetryDelay.
+	// doubles after each retry. Every delay is capped at maxCLIRetryDelay.
 	RetryBase time.Duration
 	// Sleep waits between retries; nil uses sleepContext.
 	Sleep func(ctx context.Context, d time.Duration) error
@@ -121,6 +121,7 @@ func (b ExecBacklog) readOnly(ctx context.Context, dir string, args []string) ([
 	if delay <= 0 {
 		delay = defaultCLIRetryBase
 	}
+	delay = min(delay, maxCLIRetryDelay)
 	sleep := b.Sleep
 	if sleep == nil {
 		sleep = sleepContext

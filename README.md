@@ -219,7 +219,7 @@ The config file is strict JSON. Unknown fields are rejected. JSON comments are n
 | `subIssues` | boolean | Optional; default `false` | Enables GitHub parent/child issue links for Backlog subtasks. |
 | `lockFile` | string | Optional; default is a per-config hash under the user's cache directory | File used for an advisory run lock. Set only when you need a stable custom lock location. |
 | `timeoutSeconds` | number | Optional; default `60` (`0` also means `60`); `BACKLOG_SYNC_TIMEOUT_SECONDS` overrides it | Timeout for each subprocess invocation (`git`, `backlog`, and `gh`). |
-| `cliRetries` | number | Optional; default `2`; `0` disables; maximum `10`; `BACKLOG_SYNC_CLI_RETRIES` overrides it | Retries for a read-only `backlog` call (`task list`, `task view`, `config get`, `milestone list`) that hits `timeoutSeconds`, with backoff from 2s. Writes, `git`, and `gh` calls are never retried. |
+| `cliRetries` | number | Optional; default `2`; `0` disables; maximum `10`; `BACKLOG_SYNC_CLI_RETRIES` overrides it | Retries for a read-only `backlog` call (`task list`, `task view`, `config get`, `milestone list`) that hits `timeoutSeconds`. The wait between attempts doubles from 2s and is capped at 1 minute, so with N retries one read call takes at most (1+N)×`timeoutSeconds` plus those waits (defaults: 3×60s + 2s + 4s). Writes, `git`, and `gh` calls are never retried. |
 
 Environment overrides must be non-negative integers (`BACKLOG_SYNC_CLI_RETRIES` at most `10`); an invalid value stops the run at startup. Empty values are ignored. As in the config file, `BACKLOG_SYNC_TIMEOUT_SECONDS=0` means the default (60s).
 

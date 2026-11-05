@@ -151,6 +151,16 @@ func TestExecBacklogBackoffDoublesUpToCap(t *testing.T) {
 	if fmt.Sprint(rec.sleeps) != "[30s 1m0s 1m0s 1m0s]" {
 		t.Fatalf("backoff sleeps=%v, want [30s 1m0s 1m0s 1m0s]", rec.sleeps)
 	}
+
+	rec = &retryRecorder{}
+	b = rec.backlog(&flakyRunner{timeouts: 10}, 2)
+	b.RetryBase = 5 * time.Minute
+	if _, err := b.Statuses(context.Background(), "/repo"); !errors.Is(err, errCommandTimeout) {
+		t.Fatalf("err=%v, want timeout", err)
+	}
+	if fmt.Sprint(rec.sleeps) != "[1m0s 1m0s]" {
+		t.Fatalf("backoff sleeps with a large base=%v, want the first wait clamped too: [1m0s 1m0s]", rec.sleeps)
+	}
 }
 
 func TestExecBacklogDoesNotRetryNonTimeoutErrors(t *testing.T) {
