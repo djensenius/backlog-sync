@@ -1488,16 +1488,93 @@ func TestSubIssueRemovalDecrementsCachedCountWhenAddIsRejected(t *testing.T) {
 	cfg := testConfig(tempRoot(t))
 	resolved, issues, gh := moveOffFullParentFixture()
 	// SKIPPED caches FULL at the limit; MOVER's removal from FULL succeeds but its add to
-	// OTHER is rejected as unsupported; LATER should then fit under FULL.
+	// OTHER is rejected as unsupported and the restore under FULL fails; LATER should
+	// then fit under FULL.
+	gh.subIssueErrs = []error{errors.New("cross-repo relationships are not supported"), errors.New("restore boom")}
+	var logs []string
+	app := App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, nil)
+	if links != 1 || failed != 1 || gh.removeSubIssueCalls != 1 || strings.Join(gh.addSubIssueTargets, ",") != "owner/repo#2,owner/repo#1,owner/repo#1" {
+		t.Fatalf("successful removal should free a slot when the new add and restore fail, links=%d failed=%d remove=%d adds=%v logs=%v", links, failed, gh.removeSubIssueCalls, gh.addSubIssueTargets, logs)
+	}
+	if gh.parents["LATER"].ID != "FULL" || gh.parents["MOVER"].ID != "" {
+		t.Fatalf("later child should link under the freed parent, parents=%+v", gh.parents)
+	}
+}
+
+func TestSubIssueExpectedRejectionRestoreRecountsCachedOldParent(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(tempRoot(t))
+	resolved, issues, gh := moveOffFullParentFixture()
+	// SKIPPED caches FULL at the limit; MOVER leaves FULL, its add to OTHER is rejected as
+	// cross-repo and it is restored under FULL, so FULL is full again and LATER is skipped.
+	gh.subIssueErrs = []error{errors.New("cross-repo relationships are not supported"), nil}
+	var logs []string
+	app := App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, nil)
+	if links != 0 || failed != 0 || gh.removeSubIssueCalls != 1 || strings.Join(gh.addSubIssueTargets, ",") != "owner/repo#2,owner/repo#1" || gh.parents["MOVER"].ID != "FULL" || gh.parents["LATER"].ID != "" {
+		t.Fatalf("restored child should refill the old parent, links=%d failed=%d remove=%d adds=%v parents=%+v logs=%v", links, failed, gh.removeSubIssueCalls, gh.addSubIssueTargets, gh.parents, logs)
+	}
+}
+
+func TestSubIssueExpectedRejectionRestoresPreviousParent(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(tempRoot(t))
+	for _, rejection := range []error{
+		errors.New("sub-issues are unsupported for this repository"),
+		errors.New("cross-repo relationships are not supported"),
+	} {
+		t.Run(rejection.Error(), func(t *testing.T) {
+			resolved, issues, gh := subIssueCapFixture()
+			resolved.Tasks = resolved.Tasks[:2]
+			gh.parents["C"] = IssueParentInfo{ID: "OLD", Number: 9, Repo: "owner/repo"}
+			gh.subIssueErrs = []error{rejection, nil}
+			var logs []string
+			app := App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+			links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, nil)
+			if links != 0 || failed != 0 || gh.removeSubIssueCalls != 1 || strings.Join(gh.addSubIssueTargets, ",") != "owner/repo#1,owner/repo#9" {
+				t.Fatalf("rejected move should restore the previous parent once, links=%d failed=%d remove=%d adds=%v logs=%v", links, failed, gh.removeSubIssueCalls, gh.addSubIssueTargets, logs)
+			}
+			if gh.parents["C"].ID != "OLD" || !logContains(logs, "warning: sub-issue links are not supported for owner/repo#2 under owner/repo#1") || !logContains(logs, "restore previous sub-issue parent owner/repo#9 for owner/repo#2") || logContains(logs, "error:") {
+				t.Fatalf("expected warning, restore log and restored parent, parents=%+v logs=%v", gh.parents, logs)
+			}
+		})
+	}
+}
+
+func TestSubIssueExpectedRejectionFailedRestoreCountsOnce(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(tempRoot(t))
+	for name, restoreErr := range map[string]error{
+		"error": errors.New("restore boom"),
+		"cap":   errSubIssueCap,
+	} {
+		t.Run(name, func(t *testing.T) {
+			resolved, issues, gh := subIssueCapFixture()
+			resolved.Tasks = resolved.Tasks[:2]
+			gh.parents["C"] = IssueParentInfo{ID: "OLD", Number: 9, Repo: "owner/repo"}
+			gh.subIssueErrs = []error{errors.New("unsupported for this repo"), restoreErr}
+			var logs []string
+			app := App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+			links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, nil)
+			if links != 0 || failed != 1 || gh.addSubIssueCalls != 2 || !logContains(logs, "error: task-1.1 restore sub-issue parent owner/repo#9 failed: "+restoreErr.Error()) {
+				t.Fatalf("failed restore should count as exactly one failure, links=%d failed=%d add=%d logs=%v", links, failed, gh.addSubIssueCalls, logs)
+			}
+		})
+	}
+}
+
+func TestSubIssueExpectedRejectionWithoutPreviousParentDoesNotRestore(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(tempRoot(t))
+	resolved, issues, gh := subIssueCapFixture()
+	resolved.Tasks = resolved.Tasks[:2]
 	gh.subIssueErrs = []error{errors.New("cross-repo relationships are not supported")}
 	var logs []string
 	app := App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
 	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, nil)
-	if links != 1 || failed != 0 || gh.removeSubIssueCalls != 1 || strings.Join(gh.addSubIssueTargets, ",") != "owner/repo#2,owner/repo#1" {
-		t.Fatalf("successful removal should free a slot even when the new add is rejected, links=%d failed=%d remove=%d adds=%v logs=%v", links, failed, gh.removeSubIssueCalls, gh.addSubIssueTargets, logs)
-	}
-	if gh.parents["LATER"].ID != "FULL" {
-		t.Fatalf("later child should link under the freed parent, parents=%+v", gh.parents)
+	if links != 0 || failed != 0 || gh.removeSubIssueCalls != 0 || gh.addSubIssueCalls != 1 || logContains(logs, "restore") || gh.parents["C"].ID != "" {
+		t.Fatalf("no previous parent should mean no restore, links=%d failed=%d remove=%d add=%d logs=%v", links, failed, gh.removeSubIssueCalls, gh.addSubIssueCalls, logs)
 	}
 }
 
@@ -1513,6 +1590,63 @@ func TestSubIssueCapRaceRestoreRecountsCachedOldParent(t *testing.T) {
 	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, nil)
 	if links != 0 || failed != 0 || gh.removeSubIssueCalls != 1 || strings.Join(gh.addSubIssueTargets, ",") != "owner/repo#2,owner/repo#1" || gh.parents["MOVER"].ID != "FULL" || gh.parents["LATER"].ID != "" {
 		t.Fatalf("restored child should refill the old parent, links=%d failed=%d remove=%d adds=%v parents=%+v logs=%v", links, failed, gh.removeSubIssueCalls, gh.addSubIssueTargets, gh.parents, logs)
+	}
+}
+
+func TestSubIssueUnexpectedAddErrorRestoresPreviousParent(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(tempRoot(t))
+	resolved, issues, gh := subIssueCapFixture()
+	resolved.Tasks = resolved.Tasks[:2]
+	gh.parents["C"] = IssueParentInfo{ID: "OLD", Number: 9, Repo: "owner/repo"}
+	gh.subIssueErrs = []error{errors.New("gh: Server Error (HTTP 500)"), nil}
+	var logs []string
+	app := App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, nil)
+	if links != 0 || failed != 1 || gh.removeSubIssueCalls != 1 || strings.Join(gh.addSubIssueTargets, ",") != "owner/repo#1,owner/repo#9" || gh.parents["C"].ID != "OLD" {
+		t.Fatalf("unexpected add error should fail once and restore the previous parent, links=%d failed=%d remove=%d adds=%v parents=%+v logs=%v", links, failed, gh.removeSubIssueCalls, gh.addSubIssueTargets, gh.parents, logs)
+	}
+	if !logContains(logs, "error: task-1.1 add sub-issue under owner/repo#1 failed: gh: Server Error (HTTP 500)") || !logContains(logs, "restore previous sub-issue parent owner/repo#9 for owner/repo#2") {
+		t.Fatalf("expected add error and restore logs, logs=%v", logs)
+	}
+}
+
+func TestSubIssueUnexpectedAddErrorFailedRestoreCountsOnce(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(tempRoot(t))
+	resolved, issues, gh := subIssueCapFixture()
+	resolved.Tasks = resolved.Tasks[:2]
+	gh.parents["C"] = IssueParentInfo{ID: "OLD", Number: 9, Repo: "owner/repo"}
+	gh.subIssueErrs = []error{errors.New("gh: Server Error (HTTP 500)"), errors.New("restore boom")}
+	var logs []string
+	app := App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, nil)
+	if links != 0 || failed != 1 || gh.addSubIssueCalls != 2 {
+		t.Fatalf("add error plus failed restore should count one failure, links=%d failed=%d add=%d logs=%v", links, failed, gh.addSubIssueCalls, logs)
+	}
+	if !logContains(logs, "error: task-1.1 add sub-issue under owner/repo#1 failed: gh: Server Error (HTTP 500)") || !logContains(logs, "error: task-1.1 restore sub-issue parent owner/repo#9 failed: restore boom") {
+		t.Fatalf("expected both errors logged, logs=%v", logs)
+	}
+}
+
+func TestSubIssueCapRejectedRestoreMarksOldParentFull(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(tempRoot(t))
+	resolved, issues, gh := moveOffFullParentFixture()
+	// FULL is not cached yet and reads as having room. MOVER leaves FULL, its add to
+	// OTHER is rejected and the restore under FULL hits the cap, so FULL is full and
+	// LATER must skip it without another add or count read.
+	resolved.Tasks = []Task{resolved.Tasks[0], resolved.Tasks[1], resolved.Tasks[3], resolved.Tasks[4]}
+	gh.subIssueCounts = map[string]int{"FULL": githubSubIssueLimit - 1, "OTHER": 0}
+	gh.subIssueErrs = []error{errors.New("cross-repo relationships are not supported"), errSubIssueCap}
+	var logs []string
+	app := App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, nil)
+	if links != 0 || failed != 1 || strings.Join(gh.addSubIssueTargets, ",") != "owner/repo#2,owner/repo#1" || gh.subIssueCountCalls != 1 || gh.parents["LATER"].ID != "" {
+		t.Fatalf("cap-rejected restore should mark the old parent full, links=%d failed=%d adds=%v reads=%d parents=%+v logs=%v", links, failed, gh.addSubIssueTargets, gh.subIssueCountCalls, gh.parents, logs)
+	}
+	if strings.Count(strings.Join(logs, "\n"), "warning: parent owner/repo#1 has reached GitHub's sub-issue limit; skipping") != 1 {
+		t.Fatalf("expected one limit warning for the old parent, logs=%v", logs)
 	}
 }
 

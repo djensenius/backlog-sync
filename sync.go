@@ -867,6 +867,27 @@ func (a *App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTa
 			dryRunCountDeltas[parentID] += delta
 		}
 	}
+	// restoreOldParent puts child back under the parent it was removed from in this
+	// attempt after the new link failed. It tries once and reports false only
+	// when the restore itself failed; with no previous parent there is nothing to do.
+	// Only live runs call it: a dry run never sends the add, so it is never rejected.
+	restoreOldParent := func(id string, current IssueParentInfo, child Issue) bool {
+		if current.ID == "" {
+			return true
+		}
+		a.Logf("restore previous sub-issue parent %s#%d for %s#%d", current.Repo, current.Number, child.Repo, child.Number)
+		if err := a.GitHub.AddSubIssue(ctx, current.Repo, current.Number, child.DatabaseID); err != nil {
+			a.Logf("error: %s restore sub-issue parent %s#%d failed: %v", id, current.Repo, current.Number, err)
+			if isSubIssueLimitRejection(err) {
+				// The old parent filled up meanwhile; later children skip it.
+				subIssueCounts[current.ID] = githubSubIssueLimit
+				a.warnSubIssueLimit(cfg, warned, Issue{NodeID: current.ID, Number: current.Number, Repo: current.Repo})
+			}
+			return false
+		}
+		adjustOldParentCount(current.ID, 1)
+		return true
+	}
 	for _, task := range resolved.Tasks {
 		id := CanonicalTaskID(task.ID)
 		if task.ParentTaskID == nil || strings.TrimSpace(*task.ParentTaskID) == "" {
@@ -935,23 +956,23 @@ func (a *App) syncSubIssues(ctx context.Context, cfg Config, resolved ResolvedTa
 				if isSubIssueLimitRejection(err) {
 					subIssueCounts[parent.NodeID] = githubSubIssueLimit
 					a.warnSubIssueLimit(cfg, warned, parent)
-					if current.ID != "" {
-						a.Logf("restore previous sub-issue parent %s#%d for %s#%d", current.Repo, current.Number, child.Repo, child.Number)
-						if err := a.GitHub.AddSubIssue(ctx, current.Repo, current.Number, child.DatabaseID); err != nil {
-							failed++
-							a.Logf("error: %s restore sub-issue parent %s#%d failed: %v", id, current.Repo, current.Number, err)
-						} else {
-							adjustOldParentCount(current.ID, 1)
-						}
+					if !restoreOldParent(id, current, child) {
+						failed++
 					}
 					continue
 				}
 				if isExpectedSubIssueLinkRejection(err) {
 					a.warnOnce(warned, "add-sub-issue-unsupported", "warning: sub-issue links are not supported for %s#%d under %s#%d; skipping link: %v", child.Repo, child.Number, parent.Repo, parent.Number, err)
+					if !restoreOldParent(id, current, child) {
+						failed++
+					}
 					continue
 				}
+				// The add failure is this child's one failure; a failed restore is
+				// logged but not counted again.
 				failed++
 				a.Logf("error: %s add sub-issue under %s#%d failed: %v", id, parent.Repo, parent.Number, err)
+				restoreOldParent(id, current, child)
 				continue
 			}
 		}
