@@ -48,9 +48,12 @@ func (r OSCommandRunner) Run(ctx context.Context, dir string, name string, args 
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	// Run the command in its own process group so a timeout or parent cancel
-	// also kills the processes it started (for example git under backlog).
+	// also stops the processes it started (for example git under backlog).
+	// Cancel sends SIGTERM first so git can remove its index.lock; if the
+	// command has not exited after WaitDelay, Go kills it with SIGKILL and
+	// closes the pipes, and the post-Wait group kill below removes the rest.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return killProcessGroup(cmd.Process) }
+	cmd.Cancel = func() error { return terminateProcessGroup(cmd.Process) }
 	cmd.WaitDelay = commandWaitDelay
 	cmd.Env = scrubBacklogEnv(os.Environ())
 	if r.ProtectBacklogGitWrites && name == "backlog" {
@@ -68,13 +71,14 @@ func (r OSCommandRunner) Run(ctx context.Context, dir string, name string, args 
 		// Capture it now, after Start, while the leader cannot be reaped.
 		pgid := cmd.Process.Pid
 		err = cmd.Wait()
-		// Always kill what is left of the group, whatever the outcome, so no
-		// descendant outlives Run (for example after a non-zero exit, or a
-		// clean exit just before the deadline, while a grandchild still holds
-		// stdout or stderr). The leader has been reaped by now, but POSIX does
-		// not reuse a pid as a new pgid while its group still has members, so
-		// this cannot hit an unrelated group. An empty group gives ESRCH,
-		// which is ignored.
+		// Always SIGKILL what is left of the group, whatever the outcome, so
+		// no descendant outlives Run (for example after a non-zero exit, a
+		// clean exit just before the deadline, or a descendant that ignored
+		// SIGTERM). The leader has been reaped by now. POSIX does not reuse a
+		// pid as a new pgid only while the group still has members; if the
+		// group has just emptied, a new process could in theory reuse the pid
+		// and lead a new group in the microseconds before this kill. That race
+		// is negligible. An empty group gives ESRCH, which is ignored.
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 	}
 	if parentErr := parent.Err(); parentErr != nil {
@@ -96,15 +100,16 @@ func (r OSCommandRunner) Run(ctx context.Context, dir string, name string, args 
 	return stdout.Bytes(), nil
 }
 
-// killProcessGroup sends SIGKILL to the process group led by p, falling back
-// to killing p alone if the group cannot be signalled. It runs as cmd.Cancel
-// on a timeout or parent cancel, normally before Wait has reaped the leader,
-// so p.Pid is still our group's pgid.
-func killProcessGroup(p *os.Process) error {
-	if err := syscall.Kill(-p.Pid, syscall.SIGKILL); err != nil {
-		return p.Kill()
+// terminateProcessGroup sends SIGTERM to the process group led by p, falling
+// back to signalling p alone if the group signal fails for a reason other
+// than ESRCH. It runs as cmd.Cancel on a timeout or parent cancel, normally
+// before Wait has reaped the leader, so p.Pid is still our group's pgid.
+func terminateProcessGroup(p *os.Process) error {
+	err := syscall.Kill(-p.Pid, syscall.SIGTERM)
+	if err == nil || errors.Is(err, syscall.ESRCH) {
+		return nil
 	}
-	return nil
+	return p.Signal(syscall.SIGTERM)
 }
 
 func scrubBacklogEnv(in []string) []string {

@@ -56,9 +56,14 @@ func main() {
 	backlog := ExecBacklog{Runner: runner, Retries: cfg.CLIRetryCount(), Logf: logf}
 	app := App{Git: ExecGit{Runner: runner}, Backlog: backlog, GitHub: gh, Logf: logf}
 	_, err = app.Run(ctx, cfg)
-	if err == nil && ctx.Err() != nil {
-		// A signal arrived during a step whose errors are only logged.
-		err = ctx.Err()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// A signal cancelled the run. Say so plainly, since the last error
+		// may come from a fallback that ran after the cancel.
+		logf("interrupted: %v", ctxErr)
+		if err == nil {
+			// The signal arrived during a step whose errors are only logged.
+			err = ctxErr
+		}
 	}
 	stop()
 	unlock()

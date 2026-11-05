@@ -377,3 +377,51 @@ func TestOSCommandRunnerExitBeforeTimeoutKillsGrandchild(t *testing.T) {
 	out, _ := OSCommandRunner{Timeout: time.Second}.Run(context.Background(), "", "sh", []string{"-c", "sleep 30 & echo $!; sleep 0.3"}, nil)
 	assertProcessGone(t, grandchildPID(t, out))
 }
+
+func TestOSCommandRunnerTermIgnoredGrandchildIsKilled(t *testing.T) {
+	// sh ignores SIGTERM and so do the sleeps it starts, so the group
+	// SIGTERM does nothing and cleanup relies on the WaitDelay escalation
+	// and the post-Wait group SIGKILL.
+	const timeout = 500 * time.Millisecond
+	start := time.Now()
+	out, err := OSCommandRunner{Timeout: timeout}.Run(context.Background(), "", "sh", []string{"-c", "trap '' TERM; sleep 30 & echo $!; sleep 30"}, nil)
+	elapsed := time.Since(start)
+	pid := grandchildPID(t, out)
+	if !errors.Is(err, errCommandTimeout) {
+		t.Fatalf("err=%v, want errCommandTimeout", err)
+	}
+	if limit := timeout + commandWaitDelay + time.Second; elapsed > limit {
+		t.Fatalf("Run took %s, want at most %s", elapsed, limit)
+	}
+	assertProcessGone(t, pid)
+}
+
+func TestOSCommandRunnerTermLetsGrandchildCleanUp(t *testing.T) {
+	dir := t.TempDir()
+	cleaned := filepath.Join(dir, "cleaned")
+	ready := filepath.Join(dir, "ready")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		// Cancel only once the grandchild has installed its TERM handler.
+		for ctx.Err() == nil {
+			if _, err := os.Stat(ready); err == nil {
+				cancel()
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+	// The grandchild starts its sleep before it reports ready, so the group
+	// SIGTERM always reaches that sleep, and `wait` returns as soon as the
+	// trapped signal arrives.
+	script := `(trap 'echo cleaned > "$1"; exit 0' TERM; sleep 30 & : > "$2"; wait) & sleep 30`
+	_, err := OSCommandRunner{Timeout: time.Minute}.Run(ctx, "", "sh", []string{"-c", script, "sh", cleaned, ready}, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v, want context.Canceled", err)
+	}
+	got, err := os.ReadFile(cleaned)
+	if err != nil || strings.TrimSpace(string(got)) != "cleaned" {
+		t.Fatalf("TERM handler output=%q err=%v, want %q", got, err, "cleaned")
+	}
+}
