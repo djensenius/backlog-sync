@@ -27,6 +27,7 @@ type Config struct {
 	SubIssues             bool              `json:"subIssues"`
 	LockFile              string            `json:"lockFile"`
 	TimeoutSeconds        int               `json:"timeoutSeconds"`
+	CLIRetries            *int              `json:"cliRetries"`
 	DryRun                bool              `json:"-"`
 	NoInbox               bool              `json:"-"`
 	Verbose               bool              `json:"-"`
@@ -238,6 +239,17 @@ func (cfg Config) Normalized() Config {
 		cfg.TaskPrefix = "task"
 	}
 	return cfg
+}
+
+const defaultCLIRetries = 2
+
+// CLIRetryCount returns how many times a timed-out read-only backlog call is
+// retried: cliRetries when set (0 disables retries), otherwise the default.
+func (cfg Config) CLIRetryCount() int {
+	if cfg.CLIRetries == nil {
+		return defaultCLIRetries
+	}
+	return *cfg.CLIRetries
 }
 
 func (cfg Config) ConfiguredRepos() []string {

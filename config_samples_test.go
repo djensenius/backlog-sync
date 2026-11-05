@@ -102,6 +102,85 @@ func TestLoadConfigRejectsTrailingData(t *testing.T) {
 	}
 }
 
+func writeRetryTestConfig(t *testing.T, extra string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := `{"projectOwner": "OWNER_LOGIN", "projectNumber": 1, "defaultRepo": "OWNER_LOGIN/REPOSITORY_NAME"` + extra + `}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestCLIRetriesConfig(t *testing.T) {
+	t.Setenv(envTimeoutSeconds, "")
+	t.Setenv(envCLIRetries, "")
+	for _, tc := range []struct {
+		name    string
+		extra   string
+		want    int
+		wantErr string
+	}{
+		{name: "default", want: 2},
+		{name: "explicit", extra: `, "cliRetries": 5`, want: 5},
+		{name: "disabled", extra: `, "cliRetries": 0`, want: 0},
+		{name: "negative", extra: `, "cliRetries": -1`, wantErr: "cliRetries must be a non-negative integer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := parseFlags([]string{"--root", t.TempDir(), "--config", writeRetryTestConfig(t, tc.extra)})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("parseFlags err=%v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.CLIRetryCount() != tc.want || cfg.TimeoutSeconds != 60 {
+				t.Fatalf("CLIRetryCount=%d TimeoutSeconds=%d, want %d and default 60", cfg.CLIRetryCount(), cfg.TimeoutSeconds, tc.want)
+			}
+		})
+	}
+}
+
+func TestEnvOverridesTimeoutAndCLIRetries(t *testing.T) {
+	path := writeRetryTestConfig(t, `, "timeoutSeconds": 30, "cliRetries": 3`)
+	args := []string{"--root", t.TempDir(), "--config", path}
+
+	t.Setenv(envTimeoutSeconds, "")
+	t.Setenv(envCLIRetries, "")
+	cfg, err := parseFlags(args)
+	if err != nil || cfg.TimeoutSeconds != 30 || cfg.CLIRetryCount() != 3 {
+		t.Fatalf("empty env: TimeoutSeconds=%d CLIRetryCount=%d err=%v, want file values 30 and 3", cfg.TimeoutSeconds, cfg.CLIRetryCount(), err)
+	}
+
+	t.Setenv(envTimeoutSeconds, "120")
+	t.Setenv(envCLIRetries, "0")
+	cfg, err = parseFlags(args)
+	if err != nil || cfg.TimeoutSeconds != 120 || cfg.CLIRetryCount() != 0 {
+		t.Fatalf("env override: TimeoutSeconds=%d CLIRetryCount=%d err=%v, want 120 and 0", cfg.TimeoutSeconds, cfg.CLIRetryCount(), err)
+	}
+
+	for _, tc := range []struct{ name, value string }{
+		{envTimeoutSeconds, "abc"},
+		{envTimeoutSeconds, "-5"},
+		{envCLIRetries, "1.5"},
+		{envCLIRetries, "-1"},
+	} {
+		t.Run(tc.name+"="+tc.value, func(t *testing.T) {
+			t.Setenv(envTimeoutSeconds, "")
+			t.Setenv(envCLIRetries, "")
+			t.Setenv(tc.name, tc.value)
+			_, err := parseFlags(args)
+			want := tc.name + " must be a non-negative integer"
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("parseFlags err=%v, want %q", err, want)
+			}
+		})
+	}
+}
+
 func assertOmittedRootOnlyKeys(t *testing.T, samplePath string, raw map[string]any) {
 	t.Helper()
 	for _, key := range []string{"root", "lockFile"} {
