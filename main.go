@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -49,7 +50,8 @@ func main() {
 	defer unlock()
 	runner := OSCommandRunner{Timeout: time.Duration(cfg.TimeoutSeconds) * time.Second, ProtectBacklogGitWrites: cfg.DryRun}
 	gh := ExecGitHub{Runner: runner, AllowedRepos: cfg.ConfiguredRepos()}
-	app := App{Git: ExecGit{Runner: runner}, Backlog: ExecBacklog{Runner: runner}, GitHub: gh, Logf: logf}
+	backlog := ExecBacklog{Runner: runner, Retries: cfg.CLIRetryCount(), Logf: logf}
+	app := App{Git: ExecGit{Runner: runner}, Backlog: backlog, GitHub: gh, Logf: logf}
 	if _, err := app.Run(context.Background(), cfg); err != nil {
 		logf("error: %v", err)
 		os.Exit(1)
@@ -134,6 +136,10 @@ func parseFlags(args []string) (Config, error) {
 	if mainBranchFlag != "" {
 		cfg.MainBranch = mainBranchFlag
 	}
+	cfg, err = applyEnvOverrides(cfg, os.LookupEnv)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg.DryRun = dryRun
 	cfg.NoInbox = noInbox
 	cfg.Verbose = verbose
@@ -145,6 +151,43 @@ func parseFlags(args []string) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+const (
+	envTimeoutSeconds = "BACKLOG_SYNC_TIMEOUT_SECONDS"
+	envCLIRetries     = "BACKLOG_SYNC_CLI_RETRIES"
+)
+
+// applyEnvOverrides replaces timeoutSeconds and cliRetries with their
+// environment overrides when set. Empty values are ignored; anything else must
+// be a non-negative integer.
+func applyEnvOverrides(cfg Config, lookup func(string) (string, bool)) (Config, error) {
+	if n, ok, err := envNonNegativeInt(lookup, envTimeoutSeconds); err != nil {
+		return Config{}, err
+	} else if ok {
+		cfg.TimeoutSeconds = n
+	}
+	if n, ok, err := envNonNegativeInt(lookup, envCLIRetries); err != nil {
+		return Config{}, err
+	} else if ok {
+		if n > maxCLIRetries {
+			return Config{}, fmt.Errorf("%s must be at most %d, got %d", envCLIRetries, maxCLIRetries, n)
+		}
+		cfg.CLIRetries = &n
+	}
+	return cfg, nil
+}
+
+func envNonNegativeInt(lookup func(string) (string, bool), name string) (int, bool, error) {
+	value, ok := lookup(name)
+	if !ok || value == "" {
+		return 0, false, nil
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n < 0 {
+		return 0, false, fmt.Errorf("%s must be a non-negative integer, got %q", name, value)
+	}
+	return n, true, nil
 }
 
 func loadConfig(path string) (Config, error) {
@@ -189,6 +232,12 @@ func validateConfig(cfg Config) error {
 	}
 	if cfg.Inbox.Mode != InboxModePush && cfg.Inbox.Mode != InboxModeManual {
 		return fmt.Errorf("inbox.mode must be %q or %q", InboxModePush, InboxModeManual)
+	}
+	if cfg.CLIRetries != nil && *cfg.CLIRetries < 0 {
+		return fmt.Errorf("cliRetries must be a non-negative integer")
+	}
+	if cfg.CLIRetries != nil && *cfg.CLIRetries > maxCLIRetries {
+		return fmt.Errorf("cliRetries must be at most %d", maxCLIRetries)
 	}
 	for project, repo := range cfg.Repos {
 		if project == "" || !strings.Contains(repo, "/") {

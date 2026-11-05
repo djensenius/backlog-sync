@@ -25,7 +25,16 @@ type OSCommandRunner struct {
 	ProtectBacklogGitWrites bool
 }
 
+// errCommandTimeout marks a subprocess that exceeded OSCommandRunner.Timeout.
+// A cancelled or expired parent context is never reported with it.
+var errCommandTimeout = errors.New("timed out")
+
+func commandTimeoutError(name string, args []string, timeout time.Duration) error {
+	return fmt.Errorf("%s %s: %w after %s", name, strings.Join(args, " "), errCommandTimeout, timeout)
+}
+
 func (r OSCommandRunner) Run(ctx context.Context, dir string, name string, args []string, stdin []byte) ([]byte, error) {
+	parent := ctx
 	if r.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, r.Timeout)
@@ -44,8 +53,11 @@ func (r OSCommandRunner) Run(ctx context.Context, dir string, name string, args 
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
+	if parentErr := parent.Err(); parentErr != nil {
+		return stdout.Bytes(), fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), parentErr)
+	}
 	if ctx.Err() == context.DeadlineExceeded {
-		return stdout.Bytes(), fmt.Errorf("%s %s: timed out after %s", name, strings.Join(args, " "), r.Timeout)
+		return stdout.Bytes(), commandTimeoutError(name, args, r.Timeout)
 	}
 	if err != nil {
 		return stdout.Bytes(), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
@@ -81,11 +93,68 @@ func protectBacklogGitWritesEnv(in []string) []string {
 	)
 }
 
-type ExecBacklog struct{ Runner CommandRunner }
+type ExecBacklog struct {
+	Runner CommandRunner
+	// Retries is how many extra attempts a timed-out read-only backlog call
+	// gets. Zero disables retries.
+	Retries int
+	// RetryBase is the first backoff delay (default defaultCLIRetryBase); it
+	// doubles after each retry. Every delay is capped at maxCLIRetryDelay.
+	RetryBase time.Duration
+	// Sleep waits between retries; nil uses sleepContext.
+	Sleep func(ctx context.Context, d time.Duration) error
+	// Logf reports each retry; nil disables retry logs.
+	Logf func(string, ...any)
+}
+
+const (
+	defaultCLIRetryBase = 2 * time.Second
+	maxCLIRetryDelay    = time.Minute
+)
+
+// readOnly runs a read-only, idempotent backlog command and retries it with
+// exponential backoff when it times out. Other failures return immediately, and
+// a done parent context stops retries. Commands that change Backlog data must
+// call Runner.Run directly: a timed-out write may already have committed.
+func (b ExecBacklog) readOnly(ctx context.Context, dir string, args []string) ([]byte, error) {
+	delay := b.RetryBase
+	if delay <= 0 {
+		delay = defaultCLIRetryBase
+	}
+	delay = min(delay, maxCLIRetryDelay)
+	sleep := b.Sleep
+	if sleep == nil {
+		sleep = sleepContext
+	}
+	for attempt := 1; ; attempt++ {
+		out, err := b.Runner.Run(ctx, dir, "backlog", args, nil)
+		if err == nil || attempt > b.Retries || !errors.Is(err, errCommandTimeout) || ctx.Err() != nil {
+			return out, err
+		}
+		if b.Logf != nil {
+			b.Logf("warning: %v; retrying (%d/%d)", err, attempt, b.Retries)
+		}
+		if sleepErr := sleep(ctx, delay); sleepErr != nil {
+			return out, fmt.Errorf("%w; retry stopped: %w", err, sleepErr)
+		}
+		delay = min(delay*2, maxCLIRetryDelay)
+	}
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
 
 func (b ExecBacklog) ListTasks(ctx context.Context, dir string, maxCount, skip int) (TaskListResponse, error) {
 	args := []string{"task", "list", "--json", "--max-count", strconv.Itoa(maxCount), "--skip", strconv.Itoa(skip)}
-	out, err := b.Runner.Run(ctx, dir, "backlog", args, nil)
+	out, err := b.readOnly(ctx, dir, args)
 	if err != nil {
 		return TaskListResponse{}, err
 	}
@@ -97,7 +166,7 @@ func (b ExecBacklog) ListTasks(ctx context.Context, dir string, maxCount, skip i
 }
 
 func (b ExecBacklog) ViewTask(ctx context.Context, dir, id string) (TaskViewResponse, error) {
-	out, err := b.Runner.Run(ctx, dir, "backlog", []string{"task", "view", id, "--json"}, nil)
+	out, err := b.readOnly(ctx, dir, []string{"task", "view", id, "--json"})
 	if err != nil {
 		return TaskViewResponse{}, err
 	}
@@ -109,7 +178,7 @@ func (b ExecBacklog) ViewTask(ctx context.Context, dir, id string) (TaskViewResp
 }
 
 func (b ExecBacklog) Statuses(ctx context.Context, dir string) ([]string, error) {
-	out, err := b.Runner.Run(ctx, dir, "backlog", []string{"config", "get", "statuses"}, nil)
+	out, err := b.readOnly(ctx, dir, []string{"config", "get", "statuses"})
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +198,7 @@ func (b ExecBacklog) Statuses(ctx context.Context, dir string) ([]string, error)
 
 func (b ExecBacklog) TaskPrefix(ctx context.Context, dir string) (string, error) {
 	for _, key := range []string{"taskPrefix", "task_prefix"} {
-		out, err := b.Runner.Run(ctx, dir, "backlog", []string{"config", "get", key}, nil)
+		out, err := b.readOnly(ctx, dir, []string{"config", "get", key})
 		if err == nil {
 			prefix := strings.TrimSpace(string(out))
 			if prefix != "" {
@@ -197,7 +266,7 @@ func readTaskPrefixFromBacklogDir(backlogDir string) (string, bool, error) {
 }
 
 func (b ExecBacklog) Milestones(ctx context.Context, dir string) (map[string]string, error) {
-	out, err := b.Runner.Run(ctx, dir, "backlog", []string{"milestone", "list", "--plain", "--show-completed"}, nil)
+	out, err := b.readOnly(ctx, dir, []string{"milestone", "list", "--plain", "--show-completed"})
 	if err != nil {
 		return nil, err
 	}
@@ -228,6 +297,7 @@ func (b ExecBacklog) CreateTask(ctx context.Context, dir string, in CreateTaskIn
 		args = append(args, "-l", label)
 	}
 	args = append(args, "--", in.Title)
+	// Never retried: a timed-out create may already have committed the task.
 	out, err := b.Runner.Run(ctx, dir, "backlog", args, nil)
 	if err != nil {
 		return "", err
