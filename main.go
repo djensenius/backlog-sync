@@ -233,6 +233,9 @@ func validateConfig(cfg Config) error {
 	if cfg.Inbox.Mode != InboxModePush && cfg.Inbox.Mode != InboxModeManual {
 		return fmt.Errorf("inbox.mode must be %q or %q", InboxModePush, InboxModeManual)
 	}
+	if cfg.TimeoutSeconds < 0 {
+		return fmt.Errorf("timeoutSeconds must be a non-negative integer, got %d", cfg.TimeoutSeconds)
+	}
 	if cfg.CLIRetries != nil && *cfg.CLIRetries < 0 {
 		return fmt.Errorf("cliRetries must be a non-negative integer")
 	}
