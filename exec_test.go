@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -276,4 +278,79 @@ func TestOSCommandRunnerReportsParentCancel(t *testing.T) {
 			}
 		})
 	}
+}
+
+// grandchildScript starts a long-running grandchild that inherits stdout and
+// stderr, prints its pid, and then blocks.
+var grandchildScript = []string{"-c", "sleep 30 & echo $!; sleep 30"}
+
+func grandchildPID(t *testing.T, out []byte) int {
+	t.Helper()
+	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil || pid <= 0 {
+		t.Fatalf("grandchild pid output=%q: %v", out, err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	return pid
+}
+
+func assertProcessGone(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("grandchild %d still running", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestOSCommandRunnerTimeoutKillsProcessGroup(t *testing.T) {
+	const timeout = 200 * time.Millisecond
+	start := time.Now()
+	out, err := OSCommandRunner{Timeout: timeout}.Run(context.Background(), "", "sh", grandchildScript, nil)
+	elapsed := time.Since(start)
+	pid := grandchildPID(t, out)
+	if !errors.Is(err, errCommandTimeout) {
+		t.Fatalf("err=%v, want errCommandTimeout", err)
+	}
+	if limit := timeout + commandWaitDelay + time.Second; elapsed > limit {
+		t.Fatalf("Run took %s, want at most %s", elapsed, limit)
+	}
+	assertProcessGone(t, pid)
+}
+
+func TestOSCommandRunnerParentCancelKillsProcessGroup(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop := time.AfterFunc(200*time.Millisecond, cancel)
+	defer stop.Stop()
+	start := time.Now()
+	out, err := OSCommandRunner{Timeout: time.Hour}.Run(ctx, "", "sh", grandchildScript, nil)
+	elapsed := time.Since(start)
+	pid := grandchildPID(t, out)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, errCommandTimeout) {
+		t.Fatalf("err=%v, want context.Canceled", err)
+	}
+	if limit := 200*time.Millisecond + commandWaitDelay + time.Second; elapsed > limit {
+		t.Fatalf("Run took %s, want at most %s", elapsed, limit)
+	}
+	assertProcessGone(t, pid)
+}
+
+func TestOSCommandRunnerSucceedsWhenGrandchildHoldsOutput(t *testing.T) {
+	start := time.Now()
+	out, err := OSCommandRunner{Timeout: time.Minute}.Run(context.Background(), "", "sh", []string{"-c", "sleep 30 & echo $!"}, nil)
+	elapsed := time.Since(start)
+	pid := grandchildPID(t, out)
+	if err != nil {
+		t.Fatalf("err=%v, want success once the command itself exited", err)
+	}
+	if limit := commandWaitDelay + time.Second; elapsed > limit {
+		t.Fatalf("Run took %s, want at most %s", elapsed, limit)
+	}
+	assertProcessGone(t, pid)
 }

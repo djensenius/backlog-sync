@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -29,6 +30,10 @@ type OSCommandRunner struct {
 // A cancelled or expired parent context is never reported with it.
 var errCommandTimeout = errors.New("timed out")
 
+// commandWaitDelay bounds how long Run waits for stdout and stderr to close
+// after the command exits or is killed, in case a descendant still holds them.
+const commandWaitDelay = 2 * time.Second
+
 func commandTimeoutError(name string, args []string, timeout time.Duration) error {
 	return fmt.Errorf("%s %s: %w after %s", name, strings.Join(args, " "), errCommandTimeout, timeout)
 }
@@ -42,6 +47,11 @@ func (r OSCommandRunner) Run(ctx context.Context, dir string, name string, args 
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
+	// Run the command in its own process group so a timeout or parent cancel
+	// also kills the processes it started (for example git under backlog).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return killProcessGroup(cmd.Process) }
+	cmd.WaitDelay = commandWaitDelay
 	cmd.Env = scrubBacklogEnv(os.Environ())
 	if r.ProtectBacklogGitWrites && name == "backlog" {
 		cmd.Env = protectBacklogGitWritesEnv(cmd.Env)
@@ -59,10 +69,27 @@ func (r OSCommandRunner) Run(ctx context.Context, dir string, name string, args 
 	if ctx.Err() == context.DeadlineExceeded {
 		return stdout.Bytes(), commandTimeoutError(name, args, r.Timeout)
 	}
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// The command itself exited successfully, but a descendant kept
+		// stdout or stderr open past commandWaitDelay. Treat the call as a
+		// success (the command's own output is complete) and kill whatever is
+		// left in its process group so it does not outlive the run.
+		_ = killProcessGroup(cmd.Process)
+		err = nil
+	}
 	if err != nil {
 		return stdout.Bytes(), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.Bytes(), nil
+}
+
+// killProcessGroup sends SIGKILL to the process group led by p, falling back
+// to killing p alone if the group cannot be signalled.
+func killProcessGroup(p *os.Process) error {
+	if err := syscall.Kill(-p.Pid, syscall.SIGKILL); err != nil {
+		return p.Kill()
+	}
+	return nil
 }
 
 func scrubBacklogEnv(in []string) []string {
