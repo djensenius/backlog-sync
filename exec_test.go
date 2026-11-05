@@ -227,3 +227,18 @@ func TestOSCommandRunnerMarksOnlyItsOwnTimeout(t *testing.T) {
 		t.Fatalf("parent deadline err=%v, want context.DeadlineExceeded and no per-call timeout", err)
 	}
 }
+
+func TestOSCommandRunnerReportsParentCancel(t *testing.T) {
+	for _, timeout := range []time.Duration{0, time.Hour} {
+		t.Run(fmt.Sprint("timeout=", timeout), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			stop := time.AfterFunc(20*time.Millisecond, cancel)
+			defer stop.Stop()
+			_, err := OSCommandRunner{Timeout: timeout}.Run(ctx, "", "sleep", []string{"5"}, nil)
+			if !errors.Is(err, context.Canceled) || errors.Is(err, errCommandTimeout) || err.Error() != "sleep 5: context canceled" {
+				t.Fatalf("parent cancel err=%v, want %q wrapping context.Canceled", err, "sleep 5: context canceled")
+			}
+		})
+	}
+}

@@ -53,10 +53,10 @@ func (r OSCommandRunner) Run(ctx context.Context, dir string, name string, args 
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
+	if parentErr := parent.Err(); parentErr != nil {
+		return stdout.Bytes(), fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), parentErr)
+	}
 	if ctx.Err() == context.DeadlineExceeded {
-		if parentErr := parent.Err(); parentErr != nil {
-			return stdout.Bytes(), fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), parentErr)
-		}
 		return stdout.Bytes(), commandTimeoutError(name, args, r.Timeout)
 	}
 	if err != nil {
