@@ -241,7 +241,10 @@ func (cfg Config) Normalized() Config {
 	return cfg
 }
 
-const defaultCLIRetries = 2
+const (
+	defaultCLIRetries = 2
+	maxCLIRetries     = 10
+)
 
 // CLIRetryCount returns how many times a timed-out read-only backlog call is
 // retried: cliRetries when set (0 disables retries), otherwise the default.

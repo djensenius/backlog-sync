@@ -170,6 +170,9 @@ func applyEnvOverrides(cfg Config, lookup func(string) (string, bool)) (Config, 
 	if n, ok, err := envNonNegativeInt(lookup, envCLIRetries); err != nil {
 		return Config{}, err
 	} else if ok {
+		if n > maxCLIRetries {
+			return Config{}, fmt.Errorf("%s must be at most %d, got %d", envCLIRetries, maxCLIRetries, n)
+		}
 		cfg.CLIRetries = &n
 	}
 	return cfg, nil
@@ -232,6 +235,9 @@ func validateConfig(cfg Config) error {
 	}
 	if cfg.CLIRetries != nil && *cfg.CLIRetries < 0 {
 		return fmt.Errorf("cliRetries must be a non-negative integer")
+	}
+	if cfg.CLIRetries != nil && *cfg.CLIRetries > maxCLIRetries {
+		return fmt.Errorf("cliRetries must be at most %d", maxCLIRetries)
 	}
 	for project, repo := range cfg.Repos {
 		if project == "" || !strings.Contains(repo, "/") {
