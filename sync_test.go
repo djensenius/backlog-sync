@@ -1283,6 +1283,321 @@ func TestSubIssueParentDiffAndExpectedRejectionWarnsOnce(t *testing.T) {
 	}
 }
 
+var errSubIssueCap = errors.New("gh api -X POST repos/owner/repo/issues/1/sub_issues --input -: exit status 1: gh: An error occurred while adding the sub-issue to the parent issue. Parent cannot have more than 100 sub-issues (HTTP 422)")
+
+func subIssueCapFixture() (ResolvedTasks, map[string]Issue, *fakeGitHub) {
+	parent := Issue{Number: 1, DatabaseID: 1, NodeID: "P", Repo: "owner/repo"}
+	old := Issue{Number: 9, DatabaseID: 9, NodeID: "OLD", Repo: "owner/repo"}
+	child := Issue{Number: 2, DatabaseID: 2, NodeID: "C", Repo: "owner/repo"}
+	child2 := Issue{Number: 3, DatabaseID: 3, NodeID: "C2", Repo: "owner/repo"}
+	resolved := ResolvedTasks{Tasks: []Task{{ID: "TASK-1"}, {ID: "TASK-1.1", ParentTaskID: sp("TASK-1")}, {ID: "TASK-1.2", ParentTaskID: sp("TASK-1")}}}
+	issues := map[string]Issue{"task-1": parent, "task-1.1": child, "task-1.2": child2}
+	gh := basicGH(map[string][]Issue{"owner/repo": {parent, old, child, child2}})
+	return resolved, issues, gh
+}
+
+func TestSubIssueCapRejectionWarnsOncePerParentWithoutFailing(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(tempRoot(t))
+	resolved, issues, gh := subIssueCapFixture()
+	gh.subIssueErrs = []error{errSubIssueCap}
+	var logs []string
+	app := App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, nil)
+	if links != 0 || failed != 0 || gh.addSubIssueCalls != 1 || gh.removeSubIssueCalls != 0 {
+		t.Fatalf("cap rejection should skip without failing and skip the second add, links=%d failed=%d add=%d remove=%d logs=%v", links, failed, gh.addSubIssueCalls, gh.removeSubIssueCalls, logs)
+	}
+	if strings.Count(strings.Join(logs, "\n"), "warning: parent owner/repo#1 has reached GitHub's sub-issue limit; skipping sub-issue links under it (children keep the Parent link in their body)") != 1 {
+		t.Fatalf("expected exactly one sub-issue limit warning for the parent, logs=%v", logs)
+	}
+	if logContains(logs, "error:") {
+		t.Fatalf("cap rejection must not log errors, logs=%v", logs)
+	}
+	if gh.subIssueCountCalls > 1 {
+		t.Fatalf("parent capacity should be read at most once per run, got %d", gh.subIssueCountCalls)
+	}
+}
+
+func TestSubIssueFullNewParentKeepsExistingParent(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(tempRoot(t))
+	resolved, issues, gh := subIssueCapFixture()
+	gh.parents["C"] = IssueParentInfo{ID: "OLD", Number: 9, Repo: "owner/repo"}
+	gh.parents["C2"] = IssueParentInfo{ID: "OLD", Number: 9, Repo: "owner/repo"}
+	gh.subIssueCounts = map[string]int{"P": githubSubIssueLimit}
+	gh.subIssueErr = errSubIssueCap
+	var logs []string
+	app := App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, nil)
+	if links != 0 || failed != 0 || gh.removeSubIssueCalls != 0 || gh.addSubIssueCalls != 0 {
+		t.Fatalf("full new parent must not remove the existing link, links=%d failed=%d add=%d remove=%d logs=%v", links, failed, gh.addSubIssueCalls, gh.removeSubIssueCalls, logs)
+	}
+	if gh.parents["C"].ID != "OLD" || gh.parents["C2"].ID != "OLD" {
+		t.Fatalf("existing parents should be kept, got %+v", gh.parents)
+	}
+	if strings.Count(strings.Join(logs, "\n"), "has reached GitHub's sub-issue limit; skipping") != 1 || gh.subIssueCountCalls != 1 {
+		t.Fatalf("expected one warning and one capacity read, reads=%d logs=%v", gh.subIssueCountCalls, logs)
+	}
+
+	// Dry run: reads only, and reports the skip.
+	resolved, issues, gh = subIssueCapFixture()
+	gh.parents["C"] = IssueParentInfo{ID: "OLD", Number: 9, Repo: "owner/repo"}
+	gh.subIssueCounts = map[string]int{"P": githubSubIssueLimit + 5}
+	gh.failOnWrite = true
+	logs = nil
+	dry := cfg
+	dry.DryRun = true
+	app = App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	links, failed = app.syncSubIssues(ctx, dry, resolved, issues, nil)
+	if links != 0 || failed != 0 || gh.writeCalls() != 0 || !logContains(logs, "has reached GitHub's sub-issue limit; would skip sub-issue links under it") || logContains(logs, "would remove") {
+		t.Fatalf("dry run should report the skip without writes, links=%d failed=%d writes=%d logs=%v", links, failed, gh.writeCalls(), logs)
+	}
+
+	// A failed capacity read fails that child and keeps the existing link.
+	resolved, issues, gh = subIssueCapFixture()
+	gh.parents["C"] = IssueParentInfo{ID: "OLD", Number: 9, Repo: "owner/repo"}
+	gh.subIssueCountErr = errors.New("graphql down")
+	logs = nil
+	app = App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	resolved.Tasks = resolved.Tasks[:2]
+	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues, nil)
+	if links != 0 || failed != 1 || gh.removeSubIssueCalls != 0 || gh.addSubIssueCalls != 0 || gh.parents["C"].ID != "OLD" || !logContains(logs, "task-1.1 read sub-issue count of parent owner/repo#1 failed: graphql down") {
+		t.Fatalf("capacity read failure should fail the child without removal, links=%d failed=%d add=%d remove=%d logs=%v", links, failed, gh.addSubIssueCalls, gh.removeSubIssueCalls, logs)
+	}
+}
+
+func TestSubIssueCapRaceRestoresPreviousParent(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(tempRoot(t))
+	resolved, issues, gh := subIssueCapFixture()
+	resolved.Tasks = resolved.Tasks[:2]
+	gh.parents["C"] = IssueParentInfo{ID: "OLD", Number: 9, Repo: "owner/repo"}
+	gh.subIssueCounts = map[string]int{"P": githubSubIssueLimit - 1}
+	gh.subIssueErrs = []error{errSubIssueCap, nil}
+	var logs []string
+	app := App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, nil)
+	if links != 0 || failed != 0 || gh.removeSubIssueCalls != 1 || strings.Join(gh.addSubIssueTargets, ",") != "owner/repo#1,owner/repo#9" {
+		t.Fatalf("race should restore the previous parent, links=%d failed=%d remove=%d adds=%v logs=%v", links, failed, gh.removeSubIssueCalls, gh.addSubIssueTargets, logs)
+	}
+	if gh.parents["C"].ID != "OLD" || !logContains(logs, "restore previous sub-issue parent owner/repo#9 for owner/repo#2") || strings.Count(strings.Join(logs, "\n"), "sub-issue limit") != 1 {
+		t.Fatalf("expected restored parent and one warning, parents=%+v logs=%v", gh.parents, logs)
+	}
+
+	resolved, issues, gh = subIssueCapFixture()
+	resolved.Tasks = resolved.Tasks[:2]
+	gh.parents["C"] = IssueParentInfo{ID: "OLD", Number: 9, Repo: "owner/repo"}
+	gh.subIssueErrs = []error{errSubIssueCap, errors.New("restore boom")}
+	logs = nil
+	app = App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	links, failed = app.syncSubIssues(ctx, cfg, resolved, issues, nil)
+	if links != 0 || failed != 1 || gh.addSubIssueCalls != 2 || !logContains(logs, "error: task-1.1 restore sub-issue parent owner/repo#9 failed: restore boom") {
+		t.Fatalf("failed restore should count as failed, links=%d failed=%d add=%d logs=%v", links, failed, gh.addSubIssueCalls, logs)
+	}
+}
+
+func TestSubIssueCachedCountIncrementsAfterLink(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(tempRoot(t))
+	resolved, issues, gh := subIssueCapFixture()
+	gh.subIssueCounts = map[string]int{"P": githubSubIssueLimit - 1}
+	var logs []string
+	app := App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, nil)
+	if links != 1 || failed != 0 || gh.addSubIssueCalls != 1 || gh.subIssueCountCalls != 1 || gh.parents["C"].ID != "P" || gh.parents["C2"].ID != "" {
+		t.Fatalf("first child should fill the parent and second should be skipped, links=%d failed=%d add=%d reads=%d parents=%+v logs=%v", links, failed, gh.addSubIssueCalls, gh.subIssueCountCalls, gh.parents, logs)
+	}
+	if strings.Count(strings.Join(logs, "\n"), "warning: parent owner/repo#1 has reached GitHub's sub-issue limit; skipping") != 1 || logContains(logs, "error:") {
+		t.Fatalf("expected one limit warning and no errors, logs=%v", logs)
+	}
+}
+
+func TestSubIssueCachedCountDecrementsWhenChildMovesOff(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(tempRoot(t))
+	full := Issue{Number: 1, DatabaseID: 1, NodeID: "FULL", Repo: "owner/repo"}
+	other := Issue{Number: 2, DatabaseID: 2, NodeID: "OTHER", Repo: "owner/repo"}
+	skipped := Issue{Number: 3, DatabaseID: 3, NodeID: "SKIPPED", Repo: "owner/repo"}
+	mover := Issue{Number: 4, DatabaseID: 4, NodeID: "MOVER", Repo: "owner/repo"}
+	later := Issue{Number: 5, DatabaseID: 5, NodeID: "LATER", Repo: "owner/repo"}
+	// Order matters: SKIPPED caches FULL at the limit, MOVER leaves FULL for OTHER, then LATER fits under FULL.
+	resolved := ResolvedTasks{Tasks: []Task{
+		{ID: "TASK-1"}, {ID: "TASK-2"},
+		{ID: "TASK-1.1", ParentTaskID: sp("TASK-1")},
+		{ID: "TASK-2.1", ParentTaskID: sp("TASK-2")},
+		{ID: "TASK-1.2", ParentTaskID: sp("TASK-1")},
+	}}
+	issues := map[string]Issue{"task-1": full, "task-2": other, "task-1.1": skipped, "task-2.1": mover, "task-1.2": later}
+	gh := basicGH(map[string][]Issue{"owner/repo": {full, other, skipped, mover, later}})
+	gh.parents["MOVER"] = IssueParentInfo{ID: "FULL", Number: 1, Repo: "owner/repo"}
+	gh.subIssueCounts = map[string]int{"FULL": githubSubIssueLimit, "OTHER": 0}
+	var logs []string
+	app := App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, nil)
+	if links != 2 || failed != 0 || gh.removeSubIssueCalls != 1 || strings.Join(gh.addSubIssueTargets, ",") != "owner/repo#2,owner/repo#1" || gh.subIssueCountCalls != 2 {
+		t.Fatalf("moving a child off the full parent should free room for a later child, links=%d failed=%d remove=%d adds=%v reads=%d logs=%v", links, failed, gh.removeSubIssueCalls, gh.addSubIssueTargets, gh.subIssueCountCalls, logs)
+	}
+	if gh.parents["SKIPPED"].ID != "" || gh.parents["MOVER"].ID != "OTHER" || gh.parents["LATER"].ID != "FULL" {
+		t.Fatalf("unexpected parents %+v", gh.parents)
+	}
+	if strings.Count(strings.Join(logs, "\n"), "sub-issue limit") != 1 {
+		t.Fatalf("expected one limit warning, logs=%v", logs)
+	}
+}
+
+func moveOffFullParentFixture() (ResolvedTasks, map[string]Issue, *fakeGitHub) {
+	full := Issue{Number: 1, DatabaseID: 1, NodeID: "FULL", Repo: "owner/repo"}
+	other := Issue{Number: 2, DatabaseID: 2, NodeID: "OTHER", Repo: "owner/repo"}
+	skipped := Issue{Number: 3, DatabaseID: 3, NodeID: "SKIPPED", Repo: "owner/repo"}
+	mover := Issue{Number: 4, DatabaseID: 4, NodeID: "MOVER", Repo: "owner/repo"}
+	later := Issue{Number: 5, DatabaseID: 5, NodeID: "LATER", Repo: "owner/repo"}
+	resolved := ResolvedTasks{Tasks: []Task{
+		{ID: "TASK-1"}, {ID: "TASK-2"},
+		{ID: "TASK-1.1", ParentTaskID: sp("TASK-1")},
+		{ID: "TASK-2.1", ParentTaskID: sp("TASK-2")},
+		{ID: "TASK-1.2", ParentTaskID: sp("TASK-1")},
+	}}
+	issues := map[string]Issue{"task-1": full, "task-2": other, "task-1.1": skipped, "task-2.1": mover, "task-1.2": later}
+	gh := basicGH(map[string][]Issue{"owner/repo": {full, other, skipped, mover, later}})
+	gh.parents["MOVER"] = IssueParentInfo{ID: "FULL", Number: 1, Repo: "owner/repo"}
+	gh.subIssueCounts = map[string]int{"FULL": githubSubIssueLimit, "OTHER": 0}
+	return resolved, issues, gh
+}
+
+func TestSubIssueDryRunMoveOffUncachedFullParentFreesSlot(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(tempRoot(t))
+	cfg.DryRun = true
+	resolved, issues, gh := moveOffFullParentFixture()
+	// MOVER leaves FULL before FULL's count is ever read; LATER then targets FULL.
+	resolved.Tasks = []Task{resolved.Tasks[0], resolved.Tasks[1], resolved.Tasks[3], resolved.Tasks[4]}
+	gh.failOnWrite = true
+	var logs []string
+	app := App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, nil)
+	if links != 2 || failed != 0 || gh.writeCalls() != 0 || gh.subIssueCountCalls != 2 {
+		t.Fatalf("dry-run move should free a slot on the uncached full parent, links=%d failed=%d writes=%d reads=%d logs=%v", links, failed, gh.writeCalls(), gh.subIssueCountCalls, logs)
+	}
+	if !logContains(logs, "would link owner/repo#5 under parent owner/repo#1") || logContains(logs, "sub-issue limit") {
+		t.Fatalf("dry run should report linking the later child, logs=%v", logs)
+	}
+}
+
+func TestSubIssueRemovalDecrementsCachedCountWhenAddIsRejected(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(tempRoot(t))
+	resolved, issues, gh := moveOffFullParentFixture()
+	// SKIPPED caches FULL at the limit; MOVER's removal from FULL succeeds but its add to
+	// OTHER is rejected as unsupported; LATER should then fit under FULL.
+	gh.subIssueErrs = []error{errors.New("cross-repo relationships are not supported")}
+	var logs []string
+	app := App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, nil)
+	if links != 1 || failed != 0 || gh.removeSubIssueCalls != 1 || strings.Join(gh.addSubIssueTargets, ",") != "owner/repo#2,owner/repo#1" {
+		t.Fatalf("successful removal should free a slot even when the new add is rejected, links=%d failed=%d remove=%d adds=%v logs=%v", links, failed, gh.removeSubIssueCalls, gh.addSubIssueTargets, logs)
+	}
+	if gh.parents["LATER"].ID != "FULL" {
+		t.Fatalf("later child should link under the freed parent, parents=%+v", gh.parents)
+	}
+}
+
+func TestSubIssueCapRaceRestoreRecountsCachedOldParent(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(tempRoot(t))
+	resolved, issues, gh := moveOffFullParentFixture()
+	// SKIPPED caches FULL at the limit; MOVER leaves FULL, hits the cap on OTHER and is
+	// restored under FULL, so FULL is full again and LATER must be skipped.
+	gh.subIssueErrs = []error{errSubIssueCap, nil}
+	var logs []string
+	app := App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, nil)
+	if links != 0 || failed != 0 || gh.removeSubIssueCalls != 1 || strings.Join(gh.addSubIssueTargets, ",") != "owner/repo#2,owner/repo#1" || gh.parents["MOVER"].ID != "FULL" || gh.parents["LATER"].ID != "" {
+		t.Fatalf("restored child should refill the old parent, links=%d failed=%d remove=%d adds=%v parents=%+v logs=%v", links, failed, gh.removeSubIssueCalls, gh.addSubIssueTargets, gh.parents, logs)
+	}
+}
+
+func TestRunSubIssueCapDoesNotFailSync(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		addErr  error
+		wantErr bool
+	}{
+		{"cap rejection", errSubIssueCap, false},
+		{"unrelated error", errors.New("gh: Validation Failed (HTTP 422)"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			root := tempRoot(t)
+			parent := sampleTask()
+			parent.ID = "TASK-1"
+			parent.ParentTaskID = nil
+			child := sampleTask()
+			child.ID = "TASK-1.1"
+			child.ParentTaskID = sp("TASK-1")
+			cfg := testConfig(root)
+			bl := newFakeBacklog(root, parent, child)
+			gh := basicGH(map[string][]Issue{"owner/repo": {{Number: 1, DatabaseID: 1, NodeID: "I_PARENT", HTMLURL: "u1", Title: IssueTitle(parent), Body: RenderIssueBody(parent, nil, nil), State: "open", Repo: "owner/repo"}, {Number: 2, DatabaseID: 2, NodeID: "I_CHILD", HTMLURL: "u2", Title: IssueTitle(child), Body: RenderIssueBody(child, nil, nil), State: "open", Repo: "owner/repo"}}})
+			gh.subIssueErr = tc.addErr
+			app := App{Git: fakeGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}}, rootClean: true}, Backlog: bl, GitHub: gh, Logf: func(string, ...any) {}}
+			c, err := app.Run(ctx, cfg)
+			if gh.addSubIssueCalls != 1 {
+				t.Fatalf("expected one sub-issue add attempt, got %d", gh.addSubIssueCalls)
+			}
+			if tc.wantErr {
+				if err == nil || c.Failed != 1 {
+					t.Fatalf("unrelated add error should fail the run, counters=%+v err=%v", c, err)
+				}
+				return
+			}
+			if err != nil || c.Failed != 0 || c.SubIssueLinks != 0 {
+				t.Fatalf("cap rejection should not fail the run, counters=%+v err=%v", c, err)
+			}
+		})
+	}
+}
+
+func TestSubIssueUnrelatedAddErrorsStillFail(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(tempRoot(t))
+	resolved, issues, gh := subIssueCapFixture()
+	gh.subIssueErrs = []error{errors.New("gh: Validation Failed (HTTP 422)"), errors.New("gh: Server Error (HTTP 500)")}
+	var logs []string
+	app := App{GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+	links, failed := app.syncSubIssues(ctx, cfg, resolved, issues, nil)
+	if links != 0 || failed != 2 || gh.addSubIssueCalls != 2 || logContains(logs, "sub-issue limit") {
+		t.Fatalf("unrelated add errors should still fail, links=%d failed=%d add=%d logs=%v", links, failed, gh.addSubIssueCalls, logs)
+	}
+}
+
+func TestIsSubIssueLimitRejection(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{errSubIssueCap, true},
+		{errors.New("PARENT CANNOT HAVE MORE THAN 100 SUB ISSUES"), true},
+		{errors.New("Validation Failed (HTTP 422)"), false},
+		{errors.New("cannot have more than 50 labels (HTTP 422)"), false},
+		{nil, false},
+	} {
+		if got := isSubIssueLimitRejection(tc.err); got != tc.want {
+			t.Fatalf("isSubIssueLimitRejection(%v)=%v want %v", tc.err, got, tc.want)
+		}
+	}
+}
+
+func TestExecGitHubSubIssueCount(t *testing.T) {
+	runner := &scriptRunner{outputs: map[string][]byte{"gh api graphql --input -": []byte(`{"data":{"node":{"subIssuesSummary":{"total":100}}}}`)}}
+	gh := ExecGitHub{Runner: runner, AllowedRepos: []string{"owner/repo"}}
+	if n, err := gh.SubIssueCount(context.Background(), "P"); err != nil || n != 100 {
+		t.Fatalf("SubIssueCount=%d err=%v", n, err)
+	}
+	runner.outputs["gh api graphql --input -"] = []byte(`{"data":{"node":null}}`)
+	if _, err := gh.SubIssueCount(context.Background(), "P"); err == nil {
+		t.Fatal("SubIssueCount should fail when the node has no sub-issue summary")
+	}
+}
+
 func TestSubIssueSkipsCurrentManualInboxTriageParent(t *testing.T) {
 	ctx := context.Background()
 	root := tempRoot(t)
@@ -1716,6 +2031,10 @@ type fakeGitHub struct {
 	subIssueErr              error
 	subIssueErrs             []error
 	removeSubIssueErr        error
+	subIssueCounts           map[string]int
+	subIssueCountErr         error
+	subIssueCountCalls       int
+	addSubIssueTargets       []string
 	updateErr                error
 	addProjectItemErrs       map[string]error
 	createErrTitleContains   string
@@ -1846,11 +2165,19 @@ func (g *fakeGitHub) ClearProjectField(context.Context, string, string, string) 
 func (g *fakeGitHub) IssueParent(_ context.Context, issueNodeID string) (IssueParentInfo, error) {
 	return g.parents[issueNodeID], nil
 }
+func (g *fakeGitHub) SubIssueCount(_ context.Context, issueNodeID string) (int, error) {
+	g.subIssueCountCalls++
+	if g.subIssueCountErr != nil {
+		return 0, g.subIssueCountErr
+	}
+	return g.subIssueCounts[issueNodeID], nil
+}
 func (g *fakeGitHub) AddSubIssue(_ context.Context, parentRepo string, parentNumber int, childDatabaseID int64) error {
 	if g.failOnWrite {
 		return errors.New("unexpected write")
 	}
 	g.addSubIssueCalls++
+	g.addSubIssueTargets = append(g.addSubIssueTargets, fmt.Sprintf("%s#%d", parentRepo, parentNumber))
 	if len(g.subIssueErrs) > 0 {
 		err := g.subIssueErrs[0]
 		g.subIssueErrs = g.subIssueErrs[1:]

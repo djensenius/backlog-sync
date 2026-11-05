@@ -309,7 +309,7 @@ Before any writes, every listed and viewed task ID must agree and round-trip thr
 
 When `adoptReferencedIssues` is true and a task has no marked issue, a `https://github.com/<owner>/<repo>/issues/<N>` reference whose repo matches the task target repo can be adopted. Pull requests are ignored. If several references qualify, the lowest unclaimed issue number wins. An issue with a different marker, or an issue already claimed by another task through a marker, inbox link, or earlier adoption in the run, is never adopted.
 
-When `subIssues` is true, the tool checks each child issue's current GitHub parent and links it under the parent task's issue only when different. Cross-repo sub-issue failures are logged once per run and do not abort the sync.
+When `subIssues` is true, the tool checks each child issue's current GitHub parent and links it under the parent task's issue only when different. Cross-repo sub-issue failures are logged once per run and do not abort the sync. GitHub caps a parent at 100 sub-issues (open and closed); once a parent is full, its new children are not linked (one warning per parent per run, no failure), an existing link to another parent is kept, and each child's body still carries its `Parent` link.
 
 ## Dry runs
 
