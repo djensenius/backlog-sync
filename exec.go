@@ -629,8 +629,51 @@ func (g ExecGitHub) ProjectInfo(ctx context.Context, ownerType, owner string, nu
 	return info, nil
 }
 
+// projectItemSelection is the GraphQL selection for a ProjectV2Item, shared by the items listing and
+// addProjectV2ItemById so both parse into the same ProjectItem shape.
+const projectItemSelection = `id content { ... on Issue { id } } fieldValueByName(name:"Status") { ... on ProjectV2ItemFieldSingleSelectValue { name optionId } } fieldValues(first:100) { nodes { ... on ProjectV2ItemFieldSingleSelectValue { field { ... on ProjectV2FieldCommon { name } } name optionId } ... on ProjectV2ItemFieldTextValue { field { ... on ProjectV2FieldCommon { name } } text } } }`
+
+type projectItemNode struct {
+	ID      string `json:"id"`
+	Content *struct {
+		ID string `json:"id"`
+	} `json:"content"`
+	FieldValueByName *struct {
+		Name     string `json:"name"`
+		OptionID string `json:"optionId"`
+	} `json:"fieldValueByName"`
+	FieldValues struct {
+		Nodes []struct {
+			Field *struct {
+				Name string `json:"name"`
+			} `json:"field"`
+			Name     string `json:"name"`
+			OptionID string `json:"optionId"`
+			Text     string `json:"text"`
+		} `json:"nodes"`
+	} `json:"fieldValues"`
+}
+
+func (node projectItemNode) projectItem() ProjectItem {
+	item := ProjectItem{ID: node.ID, FieldValues: map[string]ProjectFieldValue{}}
+	if node.Content != nil {
+		item.ContentNodeID = node.Content.ID
+	}
+	if node.FieldValueByName != nil {
+		item.Status = node.FieldValueByName.Name
+		item.StatusOptionID = node.FieldValueByName.OptionID
+	}
+	for _, fv := range node.FieldValues.Nodes {
+		if fv.Field == nil {
+			continue
+		}
+		item.FieldValues[fv.Field.Name] = ProjectFieldValue{Name: fv.Name, OptionID: fv.OptionID, Text: fv.Text}
+	}
+	return item
+}
+
 func (g ExecGitHub) ListProjectItems(ctx context.Context, projectID string) ([]ProjectItem, error) {
-	query := `query($project:ID!, $after:String) { node(id:$project) { ... on ProjectV2 { items(first:100, after:$after) { nodes { id content { ... on Issue { id } } fieldValueByName(name:"Status") { ... on ProjectV2ItemFieldSingleSelectValue { name optionId } } fieldValues(first:100) { nodes { ... on ProjectV2ItemFieldSingleSelectValue { field { ... on ProjectV2FieldCommon { name } } name optionId } ... on ProjectV2ItemFieldTextValue { field { ... on ProjectV2FieldCommon { name } } text } } } } pageInfo { hasNextPage endCursor } } } } }`
+	query := `query($project:ID!, $after:String) { node(id:$project) { ... on ProjectV2 { items(first:100, after:$after) { nodes { ` + projectItemSelection + ` } pageInfo { hasNextPage endCursor } } } } }`
 	var items []ProjectItem
 	var after any
 	for {
@@ -643,26 +686,7 @@ func (g ExecGitHub) ListProjectItems(ctx context.Context, projectID string) ([]P
 			Data struct {
 				Node struct {
 					Items struct {
-						Nodes []struct {
-							ID      string `json:"id"`
-							Content *struct {
-								ID string `json:"id"`
-							} `json:"content"`
-							FieldValueByName *struct {
-								Name     string `json:"name"`
-								OptionID string `json:"optionId"`
-							} `json:"fieldValueByName"`
-							FieldValues struct {
-								Nodes []struct {
-									Field *struct {
-										Name string `json:"name"`
-									} `json:"field"`
-									Name     string `json:"name"`
-									OptionID string `json:"optionId"`
-									Text     string `json:"text"`
-								} `json:"nodes"`
-							} `json:"fieldValues"`
-						} `json:"nodes"`
+						Nodes    []projectItemNode `json:"nodes"`
 						PageInfo struct {
 							HasNextPage bool    `json:"hasNextPage"`
 							EndCursor   *string `json:"endCursor"`
@@ -675,21 +699,7 @@ func (g ExecGitHub) ListProjectItems(ctx context.Context, projectID string) ([]P
 			return nil, err
 		}
 		for _, node := range resp.Data.Node.Items.Nodes {
-			item := ProjectItem{ID: node.ID, FieldValues: map[string]ProjectFieldValue{}}
-			if node.Content != nil {
-				item.ContentNodeID = node.Content.ID
-			}
-			if node.FieldValueByName != nil {
-				item.Status = node.FieldValueByName.Name
-				item.StatusOptionID = node.FieldValueByName.OptionID
-			}
-			for _, fv := range node.FieldValues.Nodes {
-				if fv.Field == nil {
-					continue
-				}
-				item.FieldValues[fv.Field.Name] = ProjectFieldValue{Name: fv.Name, OptionID: fv.OptionID, Text: fv.Text}
-			}
-			items = append(items, item)
+			items = append(items, node.projectItem())
 		}
 		if !resp.Data.Node.Items.PageInfo.HasNextPage || resp.Data.Node.Items.PageInfo.EndCursor == nil {
 			break
@@ -700,7 +710,9 @@ func (g ExecGitHub) ListProjectItems(ctx context.Context, projectID string) ([]P
 }
 
 func (g ExecGitHub) AddProjectItem(ctx context.Context, projectID, contentNodeID string) (ProjectItem, error) {
-	query := `mutation($project:ID!, $content:ID!) { addProjectV2ItemById(input:{projectId:$project, contentId:$content}) { item { id } } }`
+	// Select the item's current field values: when GitHub returns an item that already existed (but was
+	// missing from the items listing), the sync must compare against its real values, not an empty map.
+	query := `mutation($project:ID!, $content:ID!) { addProjectV2ItemById(input:{projectId:$project, contentId:$content}) { item { ` + projectItemSelection + ` } } }`
 	payload := map[string]any{"query": query, "variables": map[string]any{"project": projectID, "content": contentNodeID}}
 	out, err := g.ghJSON(ctx, []string{"api", "graphql", "--input", "-"}, payload)
 	if err != nil {
@@ -709,14 +721,14 @@ func (g ExecGitHub) AddProjectItem(ctx context.Context, projectID, contentNodeID
 	var resp struct {
 		Data struct {
 			AddProjectV2ItemByID struct {
-				Item ProjectItem `json:"item"`
+				Item projectItemNode `json:"item"`
 			} `json:"addProjectV2ItemById"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
 		return ProjectItem{}, err
 	}
-	return resp.Data.AddProjectV2ItemByID.Item, nil
+	return resp.Data.AddProjectV2ItemByID.Item.projectItem(), nil
 }
 
 func (g ExecGitHub) UpdateProjectStatus(ctx context.Context, projectID, itemID, fieldID, optionID string) error {
