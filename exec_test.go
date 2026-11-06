@@ -425,3 +425,32 @@ func TestOSCommandRunnerTermLetsGrandchildCleanUp(t *testing.T) {
 		t.Fatalf("TERM handler output=%q err=%v, want %q", got, err, "cleaned")
 	}
 }
+
+// inputRunner returns one scripted output and records each call's stdin.
+type inputRunner struct {
+	output []byte
+	inputs []string
+}
+
+func (r *inputRunner) Run(_ context.Context, _ string, _ string, _ []string, input []byte) ([]byte, error) {
+	r.inputs = append(r.inputs, string(input))
+	return r.output, nil
+}
+
+func TestExecGitHubAddProjectItemParsesReturnedFieldValues(t *testing.T) {
+	r := &inputRunner{output: []byte(`{"data":{"addProjectV2ItemById":{"item":{"id":"PVTI_1","content":{"id":"I_1"},"fieldValueByName":{"name":"In Progress","optionId":"O2"},"fieldValues":{"nodes":[{"field":{"name":"Title"},"text":"task-1: T"},{"field":{"name":"Status"},"name":"In Progress","optionId":"O2"},{"field":{"name":"Priority"},"name":"High","optionId":"PH"},{"field":{"name":"Task ID"},"text":"task-1"},{}]}}}}}`)}
+	gh := ExecGitHub{Runner: r, AllowedRepos: []string{"owner/repo"}}
+	item, err := gh.AddProjectItem(context.Background(), "P", "I_1")
+	if err != nil {
+		t.Fatalf("AddProjectItem err=%v", err)
+	}
+	if item.ID != "PVTI_1" || item.ContentNodeID != "I_1" || item.Status != "In Progress" || item.StatusOptionID != "O2" {
+		t.Fatalf("AddProjectItem item=%+v", item)
+	}
+	if item.FieldValues["Priority"].OptionID != "PH" || item.FieldValues["Task ID"].Text != "task-1" || item.FieldValues["Title"].Text != "task-1: T" || len(item.FieldValues) != 4 {
+		t.Fatalf("AddProjectItem field values=%+v", item.FieldValues)
+	}
+	if len(r.inputs) != 1 || !strings.Contains(r.inputs[0], "addProjectV2ItemById") || !strings.Contains(r.inputs[0], "fieldValues(first:100)") || !strings.Contains(r.inputs[0], "fieldValueByName") {
+		t.Fatalf("AddProjectItem mutation does not select field values: %v", r.inputs)
+	}
+}
