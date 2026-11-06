@@ -229,10 +229,17 @@ func (a *App) Run(ctx context.Context, cfg Config) (Counters, error) {
 				item = added
 				item.ContentNodeID = issue.NodeID
 				projectByContent[issue.NodeID] = item
+				if projectItemHasFieldValues(item) {
+					// GitHub returned an item that already existed but was left out of the items listing.
+					// Sync against its current values so matching fields are not rewritten.
+					a.Logf("warning: project item %s for %s#%d already existed but is missing from the project item listing; repair it by deleting the project item and re-adding the issue", item.ID, repo, issue.Number)
+				} else {
+					counters.ProjectAdded++
+				}
 			} else {
 				item = ProjectItem{ID: "DRY-RUN-" + issue.NodeID, ContentNodeID: issue.NodeID, FieldValues: map[string]ProjectFieldValue{}}
+				counters.ProjectAdded++
 			}
-			counters.ProjectAdded++
 		}
 		changed, err := a.syncProjectFields(ctx, cfg, project, item, task, milestones, issue)
 		counters.StatusChanges += changed.status
@@ -1077,6 +1084,25 @@ func labelsToIssueLabels(labels []string) []IssueLabel {
 	}
 	return out
 }
+
+// projectItemHasFieldValues reports whether an item returned by AddProjectItem already carries values,
+// meaning GitHub returned an existing item rather than creating one. The built-in Title field is set on
+// every new item, so it is ignored.
+func projectItemHasFieldValues(item ProjectItem) bool {
+	if item.Status != "" || item.StatusOptionID != "" {
+		return true
+	}
+	for name, value := range item.FieldValues {
+		if name == "Title" {
+			continue
+		}
+		if value.Name != "" || value.OptionID != "" || value.Text != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func indexProjectItems(items []ProjectItem) map[string]ProjectItem {
 	out := map[string]ProjectItem{}
 	for _, item := range items {

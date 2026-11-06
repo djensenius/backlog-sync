@@ -396,6 +396,81 @@ func TestAppProjectWriteFailureIsolatedToOneTask(t *testing.T) {
 	}
 }
 
+func TestAppAddReturningUnlistedExistingItemWarnsAndKeepsFields(t *testing.T) {
+	matching := func() ProjectItem {
+		return ProjectItem{ID: "PVTI_EXISTING", Status: "In Progress", StatusOptionID: "O2", FieldValues: map[string]ProjectFieldValue{
+			"Title":             {Text: "task-70: Unlisted item"},
+			"Status":            {Name: "In Progress", OptionID: "O2"},
+			"Priority":          {Name: "High", OptionID: "PH"},
+			"Backlog milestone": {Name: "v1 release", OptionID: "M0"},
+			"Area":              {Name: "apple", OptionID: "AA"},
+			"Task ID":           {Text: "task-70"},
+		}}
+	}
+	mismatchedPriority := matching()
+	mismatchedPriority.FieldValues["Priority"] = ProjectFieldValue{Name: "Low", OptionID: "PL"}
+	newItem := ProjectItem{ID: "PVTI_NEW", FieldValues: map[string]ProjectFieldValue{"Title": {Text: "task-70: Unlisted item"}}}
+	cases := []struct {
+		name          string
+		added         ProjectItem
+		wantWarning   bool
+		wantAdded     int
+		wantStatus    int
+		wantFieldSets int
+	}{
+		{name: "existing item with matching fields", added: matching(), wantWarning: true},
+		{name: "existing item with one mismatching field", added: mismatchedPriority, wantWarning: true, wantFieldSets: 1},
+		{name: "genuinely new item", added: newItem, wantAdded: 1, wantStatus: 1, wantFieldSets: 4},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			root := tempRoot(t)
+			cfg := testConfig(root)
+			cfg.Fields = FieldConfig{Priority: "Priority", Milestone: "Backlog milestone", Area: "Area", TaskID: "Task ID", Branch: "Branch"}
+			task := sampleTask()
+			task.ID = "TASK-70"
+			task.Title = "Unlisted item"
+			task.ParentTaskID = nil
+			task.Dependencies = nil
+			task.Subtasks = nil
+			bl := newFakeBacklog(root, task)
+			milestones, _ := bl.Milestones(ctx, root)
+			existing := Issue{Number: 70, DatabaseID: 70, NodeID: "I_70", HTMLURL: "https://github.com/owner/repo/issues/70", Title: IssueTitle(task), Body: RenderIssueBodyWithOptions(task, RenderOptions{Milestones: milestones, MainBranch: cfg.MainBranch}), State: "open", Repo: "owner/repo", Labels: labelsToIssueLabels(DesiredLabels(task, Issue{}, cfg))}
+			gh := basicGH(map[string][]Issue{"owner/repo": {existing}})
+			gh.items = nil
+			gh.project.Fields["Priority"] = ProjectField{ID: "PF", Options: map[string]string{"High": "PH", "Low": "PL"}}
+			gh.project.Fields["Backlog milestone"] = ProjectField{ID: "MF", Options: map[string]string{"v1 release": "M0"}}
+			gh.project.Fields["Area"] = ProjectField{ID: "AF", Options: map[string]string{"apple": "AA"}}
+			gh.project.Fields["Task ID"] = ProjectField{ID: "TF"}
+			gh.project.Fields["Branch"] = ProjectField{ID: "BF"}
+			gh.addProjectItemResults = map[string]ProjectItem{existing.NodeID: tc.added}
+			var logs []string
+			app := App{Git: fakeGit{worktrees: []Worktree{{Path: root, Branch: "main", IsRoot: true}}, rootClean: true}, Backlog: bl, GitHub: gh, Logf: func(f string, args ...any) { logs = append(logs, fmt.Sprintf(f, args...)) }}
+			c, err := app.Run(ctx, cfg)
+			if err != nil || c.Failed != 0 {
+				t.Fatalf("run failed: counters=%+v err=%v logs=%v", c, err, logs)
+			}
+			warning := "warning: project item PVTI_EXISTING for owner/repo#70 already existed but is missing from the project item listing; repair it by deleting the project item and re-adding the issue"
+			if got := logContains(logs, warning); got != tc.wantWarning {
+				t.Fatalf("warning present=%v, want %v; logs=%v", got, tc.wantWarning, logs)
+			}
+			if !tc.wantWarning && logContains(logs, "already existed") {
+				t.Fatalf("unexpected unlisted-item warning for a new item: %v", logs)
+			}
+			if gh.addProjectItemCalls != 1 || c.ProjectAdded != tc.wantAdded {
+				t.Fatalf("add calls=%d ProjectAdded=%d, want 1 and %d", gh.addProjectItemCalls, c.ProjectAdded, tc.wantAdded)
+			}
+			if gh.updateProjectStatusCalls != tc.wantStatus || c.StatusChanges != tc.wantStatus {
+				t.Fatalf("status writes=%d StatusChanges=%d, want %d; logs=%v", gh.updateProjectStatusCalls, c.StatusChanges, tc.wantStatus, logs)
+			}
+			if gh.fieldUpdates != tc.wantFieldSets || c.FieldChanges != tc.wantFieldSets {
+				t.Fatalf("field writes=%d FieldChanges=%d, want %d; logs=%v", gh.fieldUpdates, c.FieldChanges, tc.wantFieldSets, logs)
+			}
+		})
+	}
+}
+
 func TestInboxImportReplayIndexesIssueInSameRun(t *testing.T) {
 	ctx := context.Background()
 	root := tempRoot(t)
@@ -2171,6 +2246,7 @@ type fakeGitHub struct {
 	addSubIssueTargets       []string
 	updateErr                error
 	addProjectItemErrs       map[string]error
+	addProjectItemResults    map[string]ProjectItem
 	createErrTitleContains   string
 	failOnWrite              bool
 }
@@ -2253,6 +2329,10 @@ func (g *fakeGitHub) AddProjectItem(_ context.Context, _ string, contentNodeID s
 	g.addProjectItemCalls++
 	if err := g.addProjectItemErrs[contentNodeID]; err != nil {
 		return ProjectItem{}, err
+	}
+	if item, ok := g.addProjectItemResults[contentNodeID]; ok {
+		// Simulate GitHub returning an item the items listing leaves out: it is not added to g.items.
+		return item, nil
 	}
 	item := ProjectItem{ID: "PVTI_" + contentNodeID, ContentNodeID: contentNodeID, FieldValues: map[string]ProjectFieldValue{}}
 	g.items = append(g.items, item)
